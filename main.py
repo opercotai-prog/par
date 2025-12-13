@@ -10,9 +10,9 @@ from supabase import create_client
 
 # --- НАСТРОЙКИ КАНАЛОВ (Пока прямо в коде для простоты) ---
 CHANNELS_MAP = {
-    'kld_arenda': 'Калининград',      # Замени на реальные каналы!
-    'avito_kaliningrad': 'Калининград',
-    'dom_kld': 'Калининград'
+    'arendakvartirkalingrad': 'Калининград',      # Замени на реальные каналы!
+    #'avito_kaliningrad': 'Калининград',
+    #'dom_kld': 'Калининград'
 }
 
 # --- ПОЛУЧЕНИЕ КЛЮЧЕЙ ИЗ GITHUB SECRETS ---
@@ -32,8 +32,8 @@ except KeyError as e:
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def analyze_text_gemini(text, city_hint):
-    """Отправляем текст в Gemini 1.5 Flash"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    """Отправляем текст в Gemini 2.5"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
     
     prompt = f"""
     Роль: Парсер недвижимости. Город: {city_hint}.
