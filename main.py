@@ -44,7 +44,7 @@ def get_ai_rules():
 
 def analyze_with_gemini_fallback(text, city):
     """Платный/Медленный способ - только для сложных случаев"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
     prompt = f"""
     JSON данные из текста:
     Текст: {text}
