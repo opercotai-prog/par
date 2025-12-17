@@ -8,13 +8,8 @@ from telethon.sessions import StringSession
 from supabase import create_client
 
 # --- ⚙️ НАСТРОЙКИ ---
-# Имя канала (без @). Убедись, что оно верное!
 TARGET_CHANNEL = 'arendakvartirkalingrad' 
-
-# Сколько последних постов скачивать для анализа
 POSTS_TO_FETCH = 20 
-
-# Минимум валидных объявлений, чтобы ИИ согласился создать правила
 REQUIRED_VALID_COUNT = 4
 
 # --- 🔑 ПОЛУЧЕНИЕ КЛЮЧЕЙ ---
@@ -30,7 +25,6 @@ except KeyError as e:
     print(f"⛔️ ОШИБКА: Не найден секрет: {e}")
     exit(1)
 
-# Инициализация Supabase
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- 1. СБОР ПОСТОВ ---
@@ -44,7 +38,6 @@ async def fetch_raw_posts():
     
     try:
         async for msg in client.iter_messages(TARGET_CHANNEL, limit=POSTS_TO_FETCH):
-            # Берем только сообщения с текстом > 30 символов
             if msg.text and len(msg.text) > 30:
                 clean_text = msg.text.replace('\n', ' ').strip()
                 raw_posts.append(clean_text)
@@ -56,18 +49,15 @@ async def fetch_raw_posts():
     print(f"✅ Скачано {len(raw_posts)} текстовых сообщений.")
     return raw_posts
 
-# --- 2. АНАЛИЗ ЧЕРЕЗ GEMINI (ИСПРАВЛЕНО) ---
+# --- 2. АНАЛИЗ ЧЕРЕЗ GEMINI ---
 def analyze_with_gemini(raw_posts):
     print("🧠 Отправляю данные в Gemini...")
     
-    # Используем модель flash (она быстрее и дешевле)
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
     
-    # Склеиваем посты
     posts_blob = "\n\n--- POST START ---\n".join(raw_posts)
     
-    # ВНИМАНИЕ: Ниже в f-строке фигурные скобки для JSON удвоены {{ }}, 
-    # а скобки для переменных оставлены одинарными { }.
+    # ВНИМАНИЕ: Все скобки JSON ниже удвоены {{ }}, чтобы Python не ругался!
     
     prompt = f"""
     Роль: Старший аналитик данных.
@@ -88,11 +78,11 @@ def analyze_with_gemini(raw_posts):
     ФОРМАТ ОТВЕТА (ВЕРНИ ТОЛЬКО ВАЛИДНЫЙ JSON):
     {{
       "filters": {{
-        "whitelist": ["Список обязательных слов (сутки, заселение, выезд...)"],
-        "blacklist": ["Список слов для ИСКЛЮЧЕНИЯ (длительно, на год, куплю...)"]
+        "whitelist": ["Список обязательных слов (сутки, заселение...)"],
+        "blacklist": ["Список слов для ИСКЛЮЧЕНИЯ (длительно, на год...)"]
       }},
       "extraction": {{
-        "price_regex": "Напиши Regex для цены за сутки (число). Учти форматы: '2500', '2.500', 'от 2000'.",
+        "price_regex": "Regex для цены за сутки (число). Учти форматы: '2500', '2.500', 'от 2000'.",
         "phone_regex": "Regex для телефона РФ"
       }},
       "rooms_dictionary": {{
@@ -116,7 +106,6 @@ def analyze_with_gemini(raw_posts):
             print(f"❌ Ошибка API Google ({response.status_code}): {response.text}")
             return None
 
-        # Парсим ответ
         try:
             answer = response.json()['candidates'][0]['content']['parts'][0]['text']
             clean_json = re.sub(r'```json|```', '', answer).strip()
@@ -133,15 +122,12 @@ def analyze_with_gemini(raw_posts):
 async def main():
     print("🚀 Запуск AI-Тренера...")
     
-    # 1. Скачиваем
     posts = await fetch_raw_posts()
     if not posts:
         return
 
-    # 2. Анализируем
     rules = analyze_with_gemini(posts)
 
-    # 3. Сохраняем
     if rules:
         if "error" in rules:
             print(f"\n⚠️ ИИ ответил ошибкой: {rules['error']}")
