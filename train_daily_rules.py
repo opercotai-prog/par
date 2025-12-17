@@ -7,90 +7,109 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from supabase import create_client
 
-# --- НАСТРОЙКИ ---
-TARGET_CHANNEL = 'arendakvartirkalingrad' # Твой канал с посуточной арендой
-POSTS_TO_FETCH = 15      # Берем с запасом, чтобы набралось 10 текстовых
-REQUIRED_VALID_COUNT = 5 # ИИ должен найти минимум 5 подходящих внутри пачки
+# --- ⚙️ НАСТРОЙКИ ---
+# Канал, откуда учимся (Посуточная аренда Калининград)
+# Убедись, что имя канала правильное!
+TARGET_CHANNEL = 'arendakvartirkalingrad' 
 
+# Сколько постов скачивать для анализа
+POSTS_TO_FETCH = 20 
+# Сколько ИИ должен найти "хороших" объявлений внутри пачки, чтобы создать правила
+REQUIRED_VALID_COUNT = 4
+
+# --- 🔑 ПОЛУЧЕНИЕ КЛЮЧЕЙ ---
 try:
     API_ID = int(os.environ['TG_API_ID'])
     API_HASH = os.environ['TG_API_HASH']
     SESSION_STRING = os.environ['TG_SESSION_STRING']
+    
     SUPABASE_URL = os.environ['SUPABASE_URL']
     SUPABASE_KEY = os.environ['SUPABASE_KEY']
     GEMINI_KEY = os.environ['GEMINI_KEY']
-except KeyError:
-    print("⛔️ Ошибка: Проверь переменные окружения!")
+except KeyError as e:
+    print(f"⛔️ ОШИБКА: Не найден секретный ключ в GitHub Secrets: {e}")
+    print("Проверь настройки репозитория!")
     exit(1)
 
+# Инициализация Supabase
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- 1. СБОР СЫРЫХ ДАННЫХ (Python работает как грузчик) ---
+# --- 1. ФУНКЦИЯ СБОРА "СЫРЫХ" ПОСТОВ ---
 async def fetch_raw_posts():
-    print(f"📦 Скачиваю последние посты из {TARGET_CHANNEL}...")
+    print(f"📦 Скачиваю последние {POSTS_TO_FETCH} постов из {TARGET_CHANNEL}...")
     
     client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
     await client.start()
     
     raw_posts = []
     
-    # Просто берем последние сообщения, игнорируя только пустые картинки
-    async for msg in client.iter_messages(TARGET_CHANNEL, limit=POSTS_TO_FETCH):
-        if msg.text and len(msg.text) > 30: # Если есть хоть какой-то текст
-            # Чистим от лишних энтеров для экономии токенов
-            clean_text = msg.text.replace('\n', ' ')
-            raw_posts.append(clean_text)
-            
-        if len(raw_posts) >= 10: # Нам нужно 10 текстовых кусков
-            break
-            
-    await client.disconnect()
-    print(f"📦 Скачано {len(raw_posts)} текстовых сообщений. Отправляю в ИИ...")
+    try:
+        # Листаем сообщения
+        async for msg in client.iter_messages(TARGET_CHANNEL, limit=POSTS_TO_FETCH):
+            # Берем только те, где есть текст длиннее 30 символов
+            # (игнорируем пустые картинки альбомов)
+            if msg.text and len(msg.text) > 30:
+                # Убираем лишние переносы строк для экономии места
+                clean_text = msg.text.replace('\n', ' ').strip()
+                raw_posts.append(clean_text)
+                
+    except Exception as e:
+        print(f"⚠️ Ошибка при чтении Telegram: {e}")
+    finally:
+        await client.disconnect()
+
+    print(f"✅ Скачано {len(raw_posts)} текстовых сообщений.")
     return raw_posts
 
-# --- 2. ИНТЕЛЛЕКТУАЛЬНЫЙ АНАЛИЗ (Gemini) ---
+# --- 2. АНАЛИЗ ЧЕРЕЗ GEMINI (ИСПРАВЛЕНО) ---
 def analyze_with_gemini(raw_posts):
+    print("🧠 Отправляю данные в Gemini 1.5 Flash...")
+    
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
     
-    # Склеиваем посты для отправки
+    # Склеиваем посты в один текст через разделитель
     posts_blob = "\n\n--- POST START ---\n".join(raw_posts)
     
+    # ВНИМАНИЕ: В f-строках ниже фигурные скобки для JSON удвоены {{ }}, 
+    # а скобки для переменных оставлены одинарными { }. Это исправляет ValueError.
+    
     prompt = f"""
-    Роль: Главный аналитик данных по недвижимости.
+    Роль: Старший аналитик данных (Real Estate Data Engineer).
     Задача: Настроить парсер для ПОСУТОЧНОЙ аренды (Daily Rent).
 
     ДАННЫЕ:
-    Ниже список из 10 сырых постов. Среди них могут быть объявления о продаже, долгосрочной аренде или спам.
+    Ниже список последних постов из канала. Там может быть мусор, реклама, "куплю", "сниму".
     {posts_blob}
 
-    ИНСТРУКЦИЯ:
+    ТВОЯ ЗАДАЧА:
     1. Просканируй эти посты. Найди среди них ТЕ, которые соответствуют критериям:
-       - Это сдача в аренду (не "куплю", не "сниму").
-       - Это ПОСУТОЧНО (есть слова: сутки, ночь, заселение, свободна, бронь).
-       - Это КВАРТИРА или ДОМ (не гараж, не офис).
-       - Есть ЦЕНА.
+       - Это предложение АРЕНДЫ (СДАМ), а не спрос (сниму).
+       - Это ПОСУТОЧНО (есть слова: сутки, ночь, заселение, свободна, бронь, даты).
+       - Это КВАРТИРА/ДОМ (не гараж, не офис).
+       - В тексте есть ЦЕНА (обычно 1000-15000 руб).
     
-    2. Если ты нашел хотя бы {REQUIRED_VALID_COUNT} таких валидных постов:
-       Проанализируй их стиль написания и создай JSON-конфиг.
+    2. Если ты нашел хотя бы {REQUIRED_VALID_COUNT} таких постов:
+       На их основе создай JSON-конфигурацию.
 
-    ТРЕБОВАНИЯ К JSON (ВЕРНИ ТОЛЬКО ЕГО):
+    ФОРМАТ ОТВЕТА (ВЕРНИ ТОЛЬКО ВАЛИДНЫЙ JSON):
     {{
       "filters": {{
-        "whitelist": ["Список слов, которые ОБЯЗАТЕЛЬНО должны быть (на основе найденных валидных постов)"],
-        "blacklist": ["Список слов из мусорных постов, которые надо исключить (длительно, на год, куплю)"]
+        "whitelist": ["Список слов, которые ОБЯЗАТЕЛЬНО должны быть (например: сутки, заселение, выезд)"],
+        "blacklist": ["Список слов для ИСКЛЮЧЕНИЯ (например: длительно, на год, куплю, ищу, сниму)"]
       }},
-      "regex_patterns": {{
-        "price": "Напиши Regex, который идеально ловит цену в валидных постах. Учти, что посуточная цена (1500-10000) ниже месячной.",
-        "phone": "Regex для телефона"
+      "extraction": {{
+        "price_regex": "Напиши ОДИН мощный Python Regex, который извлекает число цены за сутки. Учти форматы из постов (например: '2500', '2.500', 'от 2000'). Группа захвата должна брать только цифры.",
+        "phone_regex": "Regex для телефона РФ"
       }},
-      "rooms_keywords": {{
-        "0": ["синонимы студии"],
-        "1": ["синонимы 1к"],
-        "2": ["синонимы 2к"]
+      "rooms_dictionary": {{
+        "0": ["список синонимов для студий, если встретились"],
+        "1": ["список синонимов для 1-к"],
+        "2": ["список синонимов для 2-к"],
+        "3": ["список синонимов для 3-к"]
       }}
     }}
 
-    ЕСЛИ ВАЛИДНЫХ ПОСТОВ МЕНЬШЕ {REQUIRED_VALID_COUNT}, ВЕРНИ JSON: {{"error": "not_enough_data"}}
+    Если валидных постов для анализа мало, верни JSON: {{ "error": "not_enough_data" }}
     """
 
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -100,47 +119,63 @@ def analyze_with_gemini(raw_posts):
         response = requests.post(url, headers=headers, json=payload)
         
         if response.status_code != 200:
-            print(f"❌ Ошибка API: {response.status_code}")
+            print(f"❌ Ошибка API Google ({response.status_code}): {response.text}")
             return None
 
         # Парсим ответ
-        answer = response.json()['candidates'][0]['content']['parts'][0]['text']
-        clean_json = re.sub(r'```json|```', '', answer).strip()
-        return json.loads(clean_json)
+        try:
+            answer = response.json()['candidates'][0]['content']['parts'][0]['text']
+            # Чистим от ```json и ```
+            clean_json = re.sub(r'```json|```', '', answer).strip()
+            return json.loads(clean_json)
+        except Exception as e:
+            print(f"❌ Ошибка парсинга JSON от Gemini: {e}")
+            print(f"Ответ был: {response.text[:200]}...") 
+            return None
 
     except Exception as e:
-        print(f"❌ Ошибка обработки ИИ: {e}")
+        print(f"❌ Системная ошибка requests: {e}")
         return None
 
-# --- ЗАПУСК ---
+# --- ГЛАВНАЯ ЛОГИКА ---
 async def main():
-    # 1. Сбор
+    print("🚀 Запуск AI-Тренера...")
+    
+    # 1. Скачиваем данные
     posts = await fetch_raw_posts()
+    
     if not posts:
-        print("Посты не найдены.")
+        print("⚠️ Не удалось получить посты. Проверь канал или Telegram.")
         return
 
-    # 2. Анализ
+    # 2. Анализируем через ИИ
     rules = analyze_with_gemini(posts)
 
-    # 3. Результат
+    # 3. Сохраняем результат
     if rules:
         if "error" in rules:
-            print(f"\n⚠️ ИИ сказал: {rules['error']}")
-            print("Видимо, в последних 10 постах слишком много мусора или долгосрока.")
+            print(f"\n⚠️ ИИ не смог создать правила: {rules['error']}")
+            print("Причина: В последних постах мало объявлений о посуточной аренде.")
         else:
-            print("\n✨ ИИ успешно создал правила для ПОСУТОЧНОЙ аренды:")
+            print("\n✨ ИИ успешно сгенерировал стратегию!")
             print(json.dumps(rules, indent=2, ensure_ascii=False))
             
-            # Сохраняем в Supabase (id=1, перезаписываем старые)
-            data = {"id": 1, "config": rules, "updated_at": "now()"}
+            # Пишем в базу (ID=1)
+            data = {
+                "id": 1, 
+                "config": rules, 
+                "updated_at": "now()"
+            }
+            
             try:
+                # Upsert = Обновить или Вставить
                 supabase.table('parsing_rules').upsert(data).execute()
-                print("\n💾 Правила сохранены! Можно запускать fast_parser.py")
+                print("\n💾 SUCCESS! Правила сохранены в Supabase.")
+                print("Теперь `fast_parser.py` будет работать по этим правилам.")
             except Exception as e:
-                print(f"Ошибка БД: {e}")
+                print(f"❌ Ошибка записи в базу данных: {e}")
     else:
-        print("Не удалось получить ответ от ИИ.")
+        print("❌ Не удалось получить ответ от ИИ.")
 
 if __name__ == "__main__":
     asyncio.run(main())
