@@ -65,7 +65,7 @@ def ask_gemini(posts):
         return None
 
     print("🧠 Отправляю в Gemini...")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
     
     # Склеиваем посты в одну колбасу
     data_str = "\n--- NEXT POST ---\n".join(posts)
