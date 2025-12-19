@@ -19,7 +19,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 # Каналы (вставляешь вручную)
 # =====================
 CHANNELS = [
-    "arendakvartirkalingrad",
+    "arendamsk_mo",
     #  "channel_2",
     #  "channel_3",
     # "channel_4",
