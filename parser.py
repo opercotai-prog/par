@@ -1,157 +1,116 @@
 import os
-import asyncio
 import re
+import asyncio
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import GetHistoryRequest
 from supabase import create_client
 
-# =========================
-# НАСТРОЙКИ
-# =========================
-
-CHANNELS = [
-    "arendakvartirkalingrad",
-    # добавь ещё 4 канала
-]
-
-CITY = "Москва"
-POST_LIMIT_PER_RUN = 50   # максимум новых постов за запуск
-
-# =========================
-# ENV
-# =========================
-
+# ==========================================
+# 1. ЗАГРУЗКА НАСТРОЕК (ИЗ GITHUB SECRETS)
+# ==========================================
 API_ID = os.getenv("TG_API_ID")
 API_HASH = os.getenv("TG_API_HASH")
+# Эта переменная решает проблему с ошибкой EOFError
 SESSION_STRING = os.getenv("TG_SESSION_STRING")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
+# Каналы для парсинга (можешь менять список)
+CHANNELS = ["arendamsk_mo", "arendakvartirkalingrad"]
+CITY = "Москва"
+
+# ==========================================
+# 2. ПРОВЕРКА НАЛИЧИЯ ВСЕХ КЛЮЧЕЙ
+# ==========================================
 if not all([API_ID, API_HASH, SESSION_STRING, SUPABASE_URL, SUPABASE_KEY]):
-    raise RuntimeError("❌ Не заданы переменные окружения")
+    print("❌ ОШИБКА: Не все секреты (Secrets) добавлены в GitHub!")
+    print("Проверь: TG_API_ID, TG_API_HASH, TG_SESSION_STRING, SUPABASE_URL, SUPABASE_KEY")
+    exit(1)
 
-# =========================
-# CLIENTS
-# =========================
-
+# Инициализация клиентов
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+client = TelegramClient(StringSession(SESSION_STRING), int(API_ID), API_HASH)
 
-client = TelegramClient(
-    StringSession(SESSION_STRING),
-    int(API_ID),
-    API_HASH
-)
-
-# =========================
-# ПАРСЕРЫ (без ИИ)
-# =========================
-
+# ==========================================
+# 3. ФУНКЦИИ ПОИСКА ДАННЫХ (РЕГУЛЯРКИ)
+# ==========================================
 def parse_price(text):
-    m = re.search(r'(\d{2,6})\s*(₽|руб)', text.replace(" ", ""))
+    text = text.replace(" ", "").replace("\xa0", "") # Убираем пробелы
+    m = re.search(r'(\d{4,7})\s*(₽|руб|rub)', text.lower())
     return int(m.group(1)) if m else None
 
 def parse_rooms(text):
     t = text.lower()
-    if "студ" in t:
-        return "studio"
-    if "1к" in t or "однокомнат" in t:
-        return "1"
-    if "2к" in t or "двухкомнат" in t:
-        return "2"
-    if "3к" in t:
-        return "3"
-    return None
+    if "студ" in t: return "studio"
+    m = re.search(r'([1-5])\s*[-]?\s*(комн|к)\b', t)
+    return m.group(1) if m else None
 
 def parse_phone(text):
-    m = re.search(r'(\+7|8)\d{10}', text.replace(" ", ""))
-    if not m:
-        return None
-    phone = m.group(0)
-    if phone.startswith("8"):
-        phone = "7" + phone[1:]
-    return phone.replace("+", "")
+    m = re.search(r'(?:\+7|8)[\s\(-]*\d{3}[\s\)-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}', text)
+    if m:
+        phone = re.sub(r'\D', '', m.group(0))
+        if phone.startswith("8"): phone = "7" + phone[1:]
+        return phone
+    return None
 
-# =========================
-# ОСНОВНАЯ ЛОГИКА
-# =========================
+# ==========================================
+# 4. ЛОГИКА ПАРСИНГА КАНАЛА
+# ==========================================
+async def parse_channel(channel_username):
+    print(f"📡 Парсим канал: {channel_username}...")
+    try:
+        # Получаем последние 20 сообщений
+        history = await client(GetHistoryRequest(
+            peer=channel_username,
+            limit=20,
+            offset_date=None, offset_id=0, max_id=0, min_id=0, add_offset=0, hash=0
+        ))
 
-async def parse_channel(channel):
-    print(f"📺 Канал: {channel}")
+        for msg in history.messages:
+            if not msg.text: continue
 
-    offset = supabase.table("parser_offsets") \
-        .select("last_message_id") \
-        .eq("source_channel", channel) \
-        .execute()
+            price = parse_price(msg.text)
+            phone = parse_phone(msg.text)
+            
+            # Сохраняем, только если нашли хотя бы цену или телефон
+            if price or phone:
+                record = {
+                    "platform": "telegram",
+                    "source_channel": channel_username,
+                    "external_id": str(msg.id),
+                    "city": CITY,
+                    "rooms": parse_rooms(msg.text),
+                    "price": price,
+                    "contact_phone": phone,
+                    "raw_text": msg.text[:2000],
+                    "is_published": True
+                }
+                
+                # Отправка в Supabase (с защитой от дублей по external_id, если настроено в БД)
+                try:
+                    supabase.table("ads").upsert(record).execute()
+                except Exception as e:
+                    print(f"⚠️ Ошибка базы: {e}")
 
-    last_id = offset.data[0]["last_message_id"] if offset.data else 0
+        print(f"✅ Канал {channel_username} обработан.")
+    except Exception as e:
+        print(f"❌ Ошибка при парсинге {channel_username}: {e}")
 
-    history = await client(GetHistoryRequest(
-        peer=channel,
-        limit=POST_LIMIT_PER_RUN,
-        offset_id=last_id,
-        offset_date=None,
-        max_id=0,
-        min_id=0,
-        add_offset=0,
-        hash=0
-    ))
-
-    max_seen_id = last_id
-    saved = 0
-
-    for msg in history.messages:
-        if not msg.text:
-            continue
-        if msg.id <= last_id:
-            continue
-
-        record = {
-            "platform": "telegram",
-            "source_channel": channel,
-            "external_id": str(msg.id),
-            "city": CITY,
-            "price": parse_price(msg.text),
-            "rooms": parse_rooms(msg.text),
-            "contact_phone": parse_phone(msg.text),
-            "raw_text": msg.text[:3000],
-            "is_agent": False,
-            "is_published": True
-        }
-
-        try:
-            supabase.table("ads").insert(record).execute()
-            saved += 1
-            max_seen_id = max(max_seen_id, msg.id)
-        except Exception:
-            pass
-
-    if max_seen_id > last_id:
-        supabase.table("parser_offsets").upsert({
-            "source_channel": channel,
-            "last_message_id": max_seen_id
-        }).execute()
-
-    print(f"✅ Сохранено: {saved}")
-
-# =========================
-# MAIN
-# =========================
-
+# ==========================================
+# 5. ЗАПУСК
+# ==========================================
 async def main():
-    await client.connect()
-
-    if not await client.is_user_authorized():
-        raise RuntimeError("❌ StringSession не авторизована")
-
-    me = await client.get_me()
-    print("👤 Авторизован как:", me.username or me.id)
-
-    for ch in CHANNELS:
-        await parse_channel(ch)
+    print("🚀 Скрипт запущен...")
+    await client.start() # Вход будет автоматическим по SESSION_STRING
+    
+    for channel in CHANNELS:
+        await parse_channel(channel)
+        await asyncio.sleep(1) # Пауза для защиты от спам-фильтра
 
     await client.disconnect()
+    print("🏁 Работа завершена!")
 
 if __name__ == "__main__":
     asyncio.run(main())
