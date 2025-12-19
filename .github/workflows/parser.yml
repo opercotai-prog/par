@@ -1,31 +1,44 @@
 name: Telegram Rent Parser
 
 on:
-  workflow_dispatch:   # ручной запуск
+  # Запуск вручную через вкладку Actions
+  workflow_dispatch:
+  
+  # Автоматический запуск каждый час
   schedule:
-    - cron: "0 * * * *"   # раз в час
+    - cron: "0 * * * *"
 
 jobs:
   parse:
     runs-on: ubuntu-latest
 
     steps:
+      # 1. Копируем код репозитория в виртуальную машину
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      # 2. Устанавливаем Python 3.11
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: 'pip' # Кэширование ускоряет последующие запуски
 
+      # 3. Устанавливаем библиотеки
       - name: Install dependencies
         run: |
-          pip install telethon supabase
+          python -m pip install --upgrade pip
+          pip install telethon supabase requests
 
+      # 4. Запуск скрипта с передачей всех секретов
       - name: Run parser
         env:
+          # Телеграм секреты
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
+          
+          # База данных Supabase
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
         run: |
