@@ -2,7 +2,6 @@ import os
 import asyncio
 from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.tl.functions.messages import GetHistoryRequest
 from supabase import create_client
 
 # --- Инициализация ---
@@ -20,40 +19,39 @@ client = TelegramClient(StringSession(SESSION_STRING), int(API_ID), API_HASH)
 async def process_channel(channel):
     print(f"\n--- 📡 ПРОВЕРКА КАНАЛА: {channel} ---")
     try:
-        # Берем 40 последних постов
-        history = await client(GetHistoryRequest(
-            peer=channel,
-            limit=40,
-            offset_date=None, offset_id=0, max_id=0, min_id=0, add_offset=0, hash=0
-        ))
+        # Используем более надежный метод get_messages
+        messages = await client.get_messages(channel, limit=20)
 
-        if not history.messages:
-            print(f"   ❌ Сообщений в канале вообще не найдено!")
+        if not messages:
+            print(f"   ❌ Сообщений не получено вообще.")
             return
 
         found_in_channel = 0
-        keywords = ["сдам", "сдаю", "аренда", "цена", "₽", "сутки", "месяц"]
+        
+        for msg in messages:
+            # Печатаем тип каждого сообщения для диагностики
+            msg_type = type(msg).__name__
+            
+            # Проверяем текст или описание под фото (caption)
+            text = msg.text or msg.message or ""
+            
+            # Печатаем абсолютно всё, что видим, чтобы понять причину пропуска
+            print(f"   🔹 ID {msg.id} | Тип: {msg_type} | Текст: {text[:50].replace(chr(10), ' ')}...")
 
-        for msg in history.messages:
-            if not msg.text:
+            if not text:
                 continue
 
-            text_lower = msg.text.lower()
-            
-            # ПРОВЕРКА: есть ли ключевые слова?
-            is_match = any(word in text_lower for word in keywords)
-
-            # Для отладки печатаем ПЕРВУЮ строку каждого сообщения, которое видим
-            first_line = msg.text.split('\n')[0][:100]
-            print(f"   🔹 ID {msg.id}: {first_line} | (Match: {is_match})")
+            # Простейший фильтр
+            keywords = ["сдам", "сдаю", "аренда", "цена", "₽", "сутки", "месяц", "кв", "квартира"]
+            is_match = any(word in text.lower() for word in keywords)
 
             if is_match:
                 record = {
                     "platform": "telegram",
                     "source_channel": channel,
                     "external_id": str(msg.id),
-                    "city": "Диагностика",
-                    "raw_text": msg.text[:3000],
+                    "city": "Debug_City",
+                    "raw_text": text[:3000],
                     "is_published": True
                 }
 
@@ -61,21 +59,27 @@ async def process_channel(channel):
                     supabase.table("ads").upsert(record).execute()
                     found_in_channel += 1
                 except Exception as db_err:
-                    print(f"      ⚠️ Ошибка записи в БД: {db_err}")
+                    print(f"      ⚠️ Ошибка БД: {db_err}")
 
-        print(f"✅ Итог по {channel}: сохранено {found_in_channel} из 40")
+        print(f"✅ Итог по {channel}: сохранено {found_in_channel}")
 
     except Exception as e:
-        print(f"❌ Ошибка канала {channel}: {e}")
+        print(f"❌ Системная ошибка канала {channel}: {e}")
 
 async def main():
-    print("🚀 СТАРТ ДИАГНОСТИКИ")
+    print("🚀 ЗАПУСК ДИАГНОСТИКИ v2")
     await client.start()
+    
+    # Проверка: видит ли нас телеграм вообще?
+    me = await client.get_me()
+    print(f"👤 Выполнен вход как: {me.first_name} (@{me.username})")
+
     for channel in CHANNELS:
         await process_channel(channel)
         await asyncio.sleep(2)
+
     await client.disconnect()
-    print("\n🏁 ПРОВЕРКА ЗАВЕРШЕНА")
+    print("\n🏁 ВСЕ ПРОВЕРКИ ЗАВЕРШЕНЫ")
 
 if __name__ == "__main__":
     asyncio.run(main())
