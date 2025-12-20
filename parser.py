@@ -7,26 +7,22 @@ from telethon.tl.functions.messages import GetHistoryRequest
 from supabase import create_client
 
 # ==========================================
-# 1. ЗАГРУЗКА НАСТРОЕК (ИЗ GITHUB SECRETS)
+# 1. НАСТРОЙКИ И КЛЮЧИ
 # ==========================================
+# Эти переменные берутся из Secrets вашего репозитория GitHub
 API_ID = os.getenv("TG_API_ID")
 API_HASH = os.getenv("TG_API_HASH")
-# Эта переменная решает проблему с ошибкой EOFError
 SESSION_STRING = os.getenv("TG_SESSION_STRING")
-
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Каналы для парсинга (можешь менять список)
-CHANNELS = ["msk_flats", "arendakvartirkalingrad"]
-CITY = "Москва"
+# Список каналов для мониторинга
+CHANNELS = ["msk_flats", "arendakvartirkalingrad", "arendamsk_mo"]
+CITY_DEFAULT = "Москва"
 
-# ==========================================
-# 2. ПРОВЕРКА НАЛИЧИЯ ВСЕХ КЛЮЧЕЙ
-# ==========================================
+# Проверка, что все ключи на месте
 if not all([API_ID, API_HASH, SESSION_STRING, SUPABASE_URL, SUPABASE_KEY]):
-    print("❌ ОШИБКА: Не все секреты (Secrets) добавлены в GitHub!")
-    print("Проверь: TG_API_ID, TG_API_HASH, TG_SESSION_STRING, SUPABASE_URL, SUPABASE_KEY")
+    print("❌ ОШИБКА: Не все Secrets добавлены в настройки GitHub!")
     exit(1)
 
 # Инициализация клиентов
@@ -34,83 +30,120 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = TelegramClient(StringSession(SESSION_STRING), int(API_ID), API_HASH)
 
 # ==========================================
-# 3. ФУНКЦИИ ПОИСКА ДАННЫХ (РЕГУЛЯРКИ)
+# 2. ФУНКЦИИ ОЧИСТКИ И ПАРСИНГА
 # ==========================================
+
+def clean_text_for_price(text):
+    """Удаляет разделители в числах типа 3.000 или 3'000"""
+    # Удаляем точки, запятые и апострофы, если они стоят между цифрами
+    text = re.sub(r'(?<=\d)[.,\'](?=\d)', '', text)
+    return text
+
 def parse_price(text):
-    text = text.replace(" ", "").replace("\xa0", "") # Убираем пробелы
-    m = re.search(r'(\d{4,7})\s*(₽|руб|rub)', text.lower())
-    return int(m.group(1)) if m else None
-
-def parse_rooms(text):
-    t = text.lower()
-    if "студ" in t: return "studio"
-    m = re.search(r'([1-5])\s*[-]?\s*(комн|к)\b', t)
-    return m.group(1) if m else None
-
-def parse_phone(text):
-    m = re.search(r'(?:\+7|8)[\s\(-]*\d{3}[\s\)-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}', text)
-    if m:
-        phone = re.sub(r'\D', '', m.group(0))
-        if phone.startswith("8"): phone = "7" + phone[1:]
-        return phone
+    """Ищет цену в тексте"""
+    text_cleaned = clean_text_for_price(text)
+    # Ищем число от 3 до 7 знаков, рядом с которым есть знак рубля или текст руб
+    # Примеры: 3000руб, 50000 ₽, 3500 rub
+    match = re.search(r'(\d{3,7})\s*(₽|руб|rub|р\.)', text_cleaned.lower())
+    if match:
+        return int(match.group(1))
     return None
 
+def parse_contact(text):
+    """Ищет номер телефона или @username"""
+    # 1. Ищем телефон (РФ)
+    phone_match = re.search(r'(?:\+7|8)[\s\(-]*\d{3}[\s\)-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}', text)
+    if phone_match:
+        phone = re.sub(r'\D', '', phone_match.group(0))
+        if phone.startswith("8"): phone = "7" + phone[1:]
+        return f"+{phone}"
+    
+    # 2. Ищем Telegram username (@name)
+    username_match = re.search(r'@[\w_]{3,}', text)
+    if username_match:
+        return username_match.group(0)
+    
+    return "Не указан"
+
+def parse_rooms(text):
+    """Определяет количество комнат"""
+    t = text.lower()
+    if "студия" in t or "#студия" in t:
+        return "studio"
+    match = re.search(r'([1-5])\s*[-]?\s*(комн|к)\b', t)
+    return match.group(1) if match else "1"
+
 # ==========================================
-# 4. ЛОГИКА ПАРСИНГА КАНАЛА
+# 3. ОСНОВНАЯ ЛОГИКА
 # ==========================================
-async def parse_channel(channel_username):
-    print(f"📡 Парсим канал: {channel_username}...")
+
+async def process_channel(channel):
+    print(f"\n📡 Чтение канала: {channel}")
     try:
-        # Получаем последние 20 сообщений
+        # Получаем последние 20 сообщений из канала
         history = await client(GetHistoryRequest(
-            peer=channel_username,
+            peer=channel,
             limit=20,
             offset_date=None, offset_id=0, max_id=0, min_id=0, add_offset=0, hash=0
         ))
 
+        found_count = 0
         for msg in history.messages:
-            if not msg.text: continue
+            if not msg.text or len(msg.text) < 10:
+                continue
 
             price = parse_price(msg.text)
-            phone = parse_phone(msg.text)
             
-            # Сохраняем, только если нашли хотя бы цену или телефон
-            if price or phone:
+            # Если цена найдена — обрабатываем пост
+            if price:
+                contact = parse_contact(msg.text)
+                rooms = parse_rooms(msg.text)
+                
+                # Формируем запись для базы данных
                 record = {
                     "platform": "telegram",
-                    "source_channel": channel_username,
+                    "source_channel": channel,
                     "external_id": str(msg.id),
-                    "city": CITY,
-                    "rooms": parse_rooms(msg.text),
+                    "city": CITY_DEFAULT,
                     "price": price,
-                    "contact_phone": phone,
-                    "raw_text": msg.text[:2000],
+                    "rooms": rooms,
+                    "contact_phone": contact,
+                    "raw_text": msg.text[:2500], # Ограничение длины текста
                     "is_published": True
                 }
-                
-                # Отправка в Supabase (с защитой от дублей по external_id, если настроено в БД)
+
+                # Отправка в Supabase (upsert по external_id предотвращает дубликаты)
                 try:
                     supabase.table("ads").upsert(record).execute()
-                except Exception as e:
-                    print(f"⚠️ Ошибка базы: {e}")
+                    print(f"   ✅ [ID {msg.id}] Сохранено: {price} руб., Контакт: {contact}")
+                    found_count += 1
+                except Exception as db_err:
+                    print(f"   ⚠️ Ошибка БД на посте {msg.id}: {db_err}")
+            
+        if found_count == 0:
+            print("   ℹ️ Новых подходящих объявлений не найдено.")
 
-        print(f"✅ Канал {channel_username} обработан.")
     except Exception as e:
-        print(f"❌ Ошибка при парсинге {channel_username}: {e}")
+        print(f"   ❌ Ошибка при работе с каналом {channel}: {e}")
 
-# ==========================================
-# 5. ЗАПУСК
-# ==========================================
 async def main():
-    print("🚀 Скрипт запущен...")
-    await client.start() # Вход будет автоматическим по SESSION_STRING
+    print("🚀 Скрипт запущен")
     
+    # Подключение клиента (автоматически по строке сессии)
+    await client.start()
+    
+    # Проверка авторизации
+    if not await client.is_user_authorized():
+        print("❌ ОШИБКА: Сессия недействительна. Получите новую TG_SESSION_STRING!")
+        return
+
+    # Обработка всех каналов
     for channel in CHANNELS:
-        await parse_channel(channel)
-        await asyncio.sleep(1) # Пауза для защиты от спам-фильтра
+        await process_channel(channel)
+        await asyncio.sleep(2) # Пауза между каналами, чтобы избежать флуд-фильтра
 
     await client.disconnect()
-    print("🏁 Работа завершена!")
+    print("\n🏁 Работа завершена!")
 
 if __name__ == "__main__":
     asyncio.run(main())
