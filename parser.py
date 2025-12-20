@@ -18,7 +18,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 # Каналы для парсинга (можешь менять список)
-CHANNELS = ["arendamsk_mo", "arendakvartirkalingrad"]
+CHANNELS = ["msk_flats", "arendakvartirkalingrad"]
 CITY = "Москва"
 
 # ==========================================
