@@ -94,10 +94,10 @@ async def main():
 
     # 🔹 СЮДА ТЫ ДОБАВЛЯЕШЬ КАНАЛЫ ДЛЯ РАЗВЕДКИ
     seed_channels = [
-        "arenda_tyumen",
-        "tyumen_rent",
-        "kvartira72",
-        "tyumen_realty",
+        "https://t.me/tyumen_zhilye_arenda_snyat",
+        "nedvizhimost_tyumen",
+        "@nedvizhimost_tyumen",
+        #"tyumen_realty",
     ]
 
     for ch in seed_channels:
