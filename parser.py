@@ -25,11 +25,11 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 # ==========================================
 
 CHANNEL_USERNAMES = [
-    "https://t.me/nedvizhimost_tyumen",
+    #"https://t.me/nedvizhimost_tyumen",
     "nedvizhimost_tyumen",
-    "https://t.me/tyumen_zhilye_arenda_snyat",
+    #"https://t.me/tyumen_zhilye_arenda_snyat",
     "tyumen_zhilye_arenda_snyat",
-    "@tyumen_zhilye_arenda_snyat",
+    #"@tyumen_zhilye_arenda_snyat",
 ]
 
 CITY = "Тюмень"
