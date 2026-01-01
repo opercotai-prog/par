@@ -1,124 +1,109 @@
 import os
-import re
 import asyncio
+import re
+from datetime import datetime
+
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl.functions.channels import GetFullChannelRequest
+
 from supabase import create_client
 
-# ==========================================
-# 1. НАСТРОЙКИ
-# ==========================================
-API_ID = os.getenv("TG_API_ID")
-API_HASH = os.getenv("TG_API_HASH")
-SESSION_STRING = os.getenv("TG_SESSION_STRING")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# =========================
+# ENV VARIABLES
+# =========================
+TG_API_ID = int(os.environ["TG_API_ID"])
+TG_API_HASH = os.environ["TG_API_HASH"]
+TG_SESSION_STRING = os.environ["TG_SESSION_STRING"]
 
-# Маппинг каналов и городов по умолчанию
-CHANNELS_CONF = {
-    "msk_flats": "Москва",
-    "arendakvartirkalingrad": "Калининград",
-    "arendamsk_mo": "Московская область"
-}
+SUPABASE_URL = os.environ["SUPABASE_URL"]
+SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 
+# =========================
+# CONSTANTS
+# =========================
+CITY_KEYWORDS = ["тюмень", "tyumen"]
+RENT_KEYWORDS = ["аренда", "сдам", "квартира", "посуточно", "жилье"]
+
+MAX_MESSAGES_TO_SCAN = 50
+
+# =========================
+# INIT CLIENTS
+# =========================
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-client = TelegramClient(StringSession(SESSION_STRING), int(API_ID), API_HASH)
 
-# ==========================================
-# 2. УМНЫЕ ПАРСЕРЫ
-# ==========================================
+tg_client = TelegramClient(
+    StringSession(TG_SESSION_STRING),
+    TG_API_ID,
+    TG_API_HASH
+)
 
-def extract_price(text):
-    """Находит цену даже в форматах 5'000, 3.000, 70.000"""
-    # Убираем мусор внутри цифр: 5'000 -> 5000
-    cleaned_text = re.sub(r'(?<=\d)[.\', ](?=\d{3})', '', text)
-    # Ищем число + валюта
-    match = re.search(r'(\d{3,7})\s*(₽|руб|rub|р\.)', cleaned_text.lower())
-    return int(match.group(1)) if match else None
+# =========================
+# UTILS
+# =========================
+def text_contains_keywords(text: str, keywords: list[str]) -> bool:
+    text = text.lower()
+    return any(k in text for k in keywords)
 
-def extract_phone(text):
-    """Ищет телефон или @username"""
-    # Телефон
-    phone = re.search(r'(?:\+7|8)[\s\(-]*\d{3}[\s\)-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}', text)
-    if phone:
-        clean_phone = re.sub(r'\D', '', phone.group(0))
-        if clean_phone.startswith("8"): clean_phone = "7" + clean_phone[1:]
-        return f"+{clean_phone}"
-    # Юзернейм
-    user = re.search(r'@[\w_]{3,}', text)
-    return user.group(0) if user else None
-
-def extract_rooms(text):
-    """Определяет количество комнат по тегам и ключевым словам"""
-    t = text.lower()
-    if "студия" in t or "studio" in t: return "studio"
-    if "однокомн" in t or "1-к" in t or "1к" in t or "трёшка" not in t and "1" in t: return "1"
-    if "двухкомн" in t or "2-к" in t or "2к" in t: return "2"
-    if "трехкомн" in t or "3-к" in t or "трёшка" in t: return "3"
-    return None
-
-def is_ad(text):
-    """Отсеивает рекламу"""
-    blacklist = ["#реклама", "пицца", "стоматология", "зубы", "скидка на всё меню"]
-    return any(word in text.lower() for word in blacklist)
-
-# ==========================================
-# 3. ОСНОВНАЯ ЛОГИКА
-# ==========================================
-
-async def process_channel(channel, default_city):
-    print(f"📡 Обработка {channel}...")
+# =========================
+# MAIN LOGIC
+# =========================
+async def process_channel(channel_username: str):
     try:
-        messages = await client.get_messages(channel, limit=30)
-        
-        for msg in messages:
-            if not msg.text or is_ad(msg.text):
-                continue
+        entity = await tg_client.get_entity(channel_username)
+        full = await tg_client(GetFullChannelRequest(entity))
 
-            price = extract_price(msg.text)
-            
-            # Сохраняем только если есть цена (признак аренды)
-            if price:
-                contact = extract_phone(msg.text)
-                rooms = extract_rooms(msg.text)
-                
-                # Попытка уточнить город из текста
-                city = default_city
-                if "светлогорск" in msg.text.lower(): city = "Светлогорск"
-                if "зеленоградск" in msg.text.lower(): city = "Зеленоградск"
+        title = entity.title or ""
+        description = full.full_chat.about or ""
+        participants = full.full_chat.participants_count or 0
 
-                record = {
-                    "platform": "telegram",
-                    "source_channel": channel,
-                    "external_id": str(msg.id),
-                    "city": city,
-                    "rooms": rooms,
-                    "price": price,
-                    "contact_phone": contact,
-                    "raw_text": msg.text[:3000],
-                    "is_published": True
-                }
+        # --- quick semantic filter ---
+        if not text_contains_keywords(title + description, CITY_KEYWORDS):
+            return
 
-                try:
-                    supabase.table("ads").upsert(record).execute()
-                    print(f"   ✅ [ID {msg.id}] {price} руб. | {rooms}к | {contact}")
-                except Exception as e:
-                    if "duplicate" not in str(e):
-                        print(f"   ⚠️ Ошибка БД: {e}")
+        if not text_contains_keywords(title + description, RENT_KEYWORDS):
+            return
+
+        # --- activity check ---
+        last_message_date = None
+        async for msg in tg_client.iter_messages(entity, limit=1):
+            last_message_date = msg.date
+
+        record = {
+            "username": channel_username,
+            "title": title,
+            "description": description,
+            "participants_count": participants,
+            "last_message_at": last_message_date.isoformat() if last_message_date else None,
+            "stage": "raw",
+            "source": "telegram",
+            "city": "Tyumen"
+        }
+
+        supabase.table("channels").upsert(record).execute()
+        print(f"[OK] {channel_username}")
 
     except Exception as e:
-        print(f"❌ Ошибка в канале {channel}: {e}")
+        print(f"[ERROR] {channel_username} -> {e}")
 
+# =========================
+# ENTRYPOINT
+# =========================
 async def main():
-    print("🚀 ПАРСЕР ЗАПУЩЕН")
-    await client.start()
-    
-    for channel, city in CHANNELS_CONF.items():
-        await process_channel(channel, city)
-        await asyncio.sleep(2)
+    await tg_client.start()
 
-    await client.disconnect()
-    print("🏁 ВСЕ ГОТОВО")
+    # 🔹 СЮДА ТЫ ДОБАВЛЯЕШЬ КАНАЛЫ ДЛЯ РАЗВЕДКИ
+    seed_channels = [
+        "arenda_tyumen",
+        "tyumen_rent",
+        "kvartira72",
+        "tyumen_realty",
+    ]
+
+    for ch in seed_channels:
+        await process_channel(ch)
+
+    await tg_client.disconnect()
 
 if __name__ == "__main__":
     asyncio.run(main())
