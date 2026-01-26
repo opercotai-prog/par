@@ -38,7 +38,7 @@ async def run_task():
 
     # 2. Идем в Телеграм за новыми постами
     # min_id гарантирует, что мы возьмем только посты новее, чем в прошлый раз
-    async for msg in client.iter_messages(ch['username'], min_id=last_id, reverse=True):
+    async for msg in client.iter_messages(ch['username'], min_id=last_id, reverse=True, limit=50):
         if not msg.text:
             continue
         
