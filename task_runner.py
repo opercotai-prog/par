@@ -2,111 +2,126 @@ import os
 import re
 import hashlib
 import asyncio
+import json
+import requests
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from supabase import create_client
 
-# Используем обновленные названия ключей
+# --- НАСТРОЙКИ И КЛЮЧИ ---
 api_id = int(os.getenv("TG_API_ID"))
 api_hash = os.getenv("TG_API_HASH")
 session_str = os.getenv("TG_SESSION_STRING")
-supabase_url = os.getenv("SUPABASEE_URL")  # Твоя версия с буквой E
-supabase_key = os.getenv("SUPABASEE_KEY")  # Твоя версия с буквой E
+supabase_url = os.getenv("SUPABASEE_URL")
+supabase_key = os.getenv("SUPABASEE_KEY")
+gemini_key = os.getenv("GEMINI_KEY") # Добавь этот секрет в GitHub!
 
-# Инициализация клиента Supabase
 supabase = create_client(supabase_url, supabase_key)
+
+# --- ФУНКЦИЯ ИИ (Твой Gemini REST API) ---
+def analyze_with_ai(text, city_hint):
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+    
+    prompt = f"""
+    Проанализируй объявление об аренде в городе {city_hint}.
+    Текст: "{text}"
+    Верни ТОЛЬКО JSON:
+    {{
+      "price": число_или_null,
+      "category": "studio/1-room/2-room/3-room/room/null",
+      "address": "улица и номер дома или null",
+      "is_agent": true/false,
+      "comment": "почему так решил"
+    }}
+    """
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    headers = {'Content-Type': 'application/json'}
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        if response.status_code == 200:
+            result = response.json()
+            answer = result['candidates'][0]['content']['parts'][0]['text']
+            cleaned = re.sub(r'```json|```', '', answer).strip()
+            return json.loads(cleaned)
+    except Exception as e:
+        print(f"      ❌ Ошибка AI: {e}")
+    return None
 
 async def run_task():
     client = TelegramClient(StringSession(session_str), api_id, api_hash)
     await client.start()
 
-    # 1. Получаем данные канала и его конфиг (Паспорт)
-    # Берем первый активный канал для теста
+    # Берем активный канал
     res = supabase.table("channels").select("*").eq("username", "arendatumen72rus").single().execute()
+    if not res.data: return
     
-    if not res.data:
-        print("Канал не найден в базе!")
-        await client.disconnect()
-        return
-
     ch = res.data
     conf = ch['parser_config']
     last_id = ch.get('last_message_id', 0)
-    new_last_id = last_id
+    city = conf['typing'].get('geo_city', 'Тюмень')
 
-    print(f"Начинаем проверку канала {ch['username']} с сообщения #{last_id}")
-
-    # 2. Идем в Телеграм за новыми постами
-    # min_id гарантирует, что мы возьмем только посты новее, чем в прошлый раз
     async for msg in client.iter_messages(ch['username'], min_id=last_id, reverse=True, limit=50):
-        if not msg.text:
-            continue
+        if not msg.text or len(msg.text) < 30: continue
         
-        # 3. СОРТИРОВКА ПО ПАСПОРТУ
-        # Очистка текста от мусора по маркеру из конфига
-        trash_marker = conf['code_instructions'].get('trash_marker', "Подписывайтесь")
-        clean_text = msg.text.split(trash_marker)[0].strip()
+        # 1. ПЕРВИЧНАЯ ОЧИСТКА (Код)
+        clean_text = msg.text.split('#')[0].split('________')[0].strip()
         
-        # Поиск цены (цифры перед ₽ или руб)
-        price_search = re.findall(r'(\d[\d\s]{2,})\s*(?:₽|руб)', clean_text.replace('\xa0', ' '))
-        price = int(re.sub(r'\s+', '', price_search[0])) if price_search else 0
+        # Попытка найти цену кодом
+        price_found = re.findall(r'(\d[\d\s]{3,})\s*(?:₽|руб|т\.р|тыс)', clean_text.replace('\xa0', ' '))
+        price = int(re.sub(r'\s+', '', price_found[0])) if price_found else 0
         
-        # Определение категории (1к, 2к, студия)
         category = "other"
-        for key, value in conf['code_instructions']['category_map'].items():
-            if key.lower() in clean_text.lower():
-                category = value
-                break
-        
-        # Создаем уникальный хеш текста для защиты от дублей
-        content_hash = hashlib.md5(clean_text.encode()).hexdigest()
+        ai_analysis = "Processed by Regex"
 
-        # 4. СОХРАНЕНИЕ В БАЗУ
+        # 2. ЕСЛИ КОД НЕ СПРАВИЛСЯ — ВКЛЮЧАЕМ ИИ (Красный коридор)
+        if price == 0:
+            print(f"🔍 Пост {msg.id}: Код не нашел цену. Запрос к Gemini...")
+            ai_data = analyze_with_ai(clean_text, city)
+            if ai_data:
+                price = ai_data.get('price') or 0
+                category = ai_data.get('category') or "other"
+                ai_analysis = ai_data.get('comment', "AI successful")
+                # Можно также обновить адрес в деталях
+            else:
+                print(f"⏩ Пропуск {msg.id}: ИИ тоже не помог.")
+                continue
+
+        # Если даже после ИИ цена 0 — это не объявление (реклама услуг и т.д.)
+        if price < 5000: 
+            continue
+
+        # 3. СОХРАНЕНИЕ
+        content_hash = hashlib.md5(clean_text.encode()).hexdigest()
         post_data = {
             "channel_id": ch['id'],
             "telegram_msg_id": msg.id,
             "deal_type": "rent",
             "category": category,
             "price": price,
-            "city": conf['typing'].get('geo_city', 'Тюмень'),
+            "city": city,
             "raw_text_cleaned": clean_text,
             "content_hash": content_hash,
-            "details": {"raw_full_text": msg.text}
+            "details": {"ai_comment": ai_analysis, "full_text": msg.text}
         }
 
         try:
-            # Вставляем объявление
             ins_res = supabase.table("posts").insert(post_data).execute()
-            
             if ins_res.data:
-                current_post_id = ins_res.data[0]['id']
-                # Вытаскиваем контакты (Шаг 3)
+                # Шаг 3: Контакты (можно тоже через AI или Regex)
                 phones = re.findall(r'\+?\d{10,12}', clean_text)
-                handles = re.findall(r'@\w+', clean_text)
-                
                 supabase.table("contacts").insert({
-                    "post_id": current_post_id,
-                    "phones": phones,
-                    "tg_handles": handles,
-                    "links": {"source_msg_id": msg.id}
+                    "post_id": ins_res.data[0]['id'],
+                    "phones": phones
                 }).execute()
-                print(f"Добавлен новый пост: #{msg.id}, Цена: {price}")
-        
+                print(f"✅ Добавлен: #{msg.id} | Цена: {price} | Тип: {category}")
         except Exception as e:
-            # Если сработал уникальный индекс на content_hash - это дубль, просто идем дальше
-            print(f"Пропуск сообщения {msg.id} (возможно дубль или ошибка): {e}")
+            print(f"❌ Ошибка записи {msg.id}: {e}")
 
-        # Запоминаем ID самого последнего сообщения
-        if msg.id > new_last_id:
-            new_last_id = msg.id
+        last_id = msg.id
 
-    # 5. Обновляем прогресс канала в базе
-    if new_last_id > last_id:
-        supabase.table("channels").update({"last_message_id": new_last_id}).eq("id", ch['id']).execute()
-        print(f"Прогресс обновлен до #{new_last_id}")
-    else:
-        print("Новых постов не обнаружено.")
-
+    # Обновляем ID последнего сообщения
+    supabase.table("channels").update({"last_message_id": last_id}).eq("id", ch['id']).execute()
     await client.disconnect()
 
 if __name__ == "__main__":
