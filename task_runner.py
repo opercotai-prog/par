@@ -68,24 +68,30 @@ async def run_task():
         clean_text = msg.text.split('#')[0].split('________')[0].strip()
         
         # Попытка найти цену кодом
+        # ... (внутри цикла iter_messages) ...
+        
+        # Поиск цены кодом
         price_found = re.findall(r'(\d[\d\s]{3,})\s*(?:₽|руб|т\.р|тыс)', clean_text.replace('\xa0', ' '))
         price = int(re.sub(r'\s+', '', price_found[0])) if price_found else 0
         
+        # Поиск категории кодом
         category = "other"
-        ai_analysis = "Processed by Regex"
+        for key, value in conf['code_instructions']['category_map'].items():
+            if key.lower() in clean_text.lower():
+                category = value
+                break
 
-        # 2. ЕСЛИ КОД НЕ СПРАВИЛСЯ — ВКЛЮЧАЕМ ИИ (Красный коридор)
-        if price == 0:
-            print(f"🔍 Пост {msg.id}: Код не нашел цену. Запрос к Gemini...")
+        # --- ТРИГГЕР ИИ: Если цена 0 ИЛИ категория не определена ---
+        if price == 0 or category == "other":
+            print(f"🔍 Пост {msg.id}: Нужна помощь ИИ (Цена: {price}, Кат: {category})")
             ai_data = analyze_with_ai(clean_text, city)
             if ai_data:
-                price = ai_data.get('price') or 0
-                category = ai_data.get('category') or "other"
-                ai_analysis = ai_data.get('comment', "AI successful")
-                # Можно также обновить адрес в деталях
+                price = ai_data.get('price') or price # Берем из ИИ или оставляем старую
+                category = ai_data.get('category') or category
+                ai_analysis = ai_data.get('comment', "AI patched data")
             else:
-                print(f"⏩ Пропуск {msg.id}: ИИ тоже не помог.")
-                continue
+                if price == 0: # Если ИИ не ответил и цены нет - скипаем
+                    continue
 
         # Если даже после ИИ цена 0 — это не объявление (реклама услуг и т.д.)
         if price < 5000: 
