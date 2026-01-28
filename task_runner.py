@@ -19,9 +19,8 @@ gemini_key = os.getenv("GEMINI_KEY")
 supabase = create_client(supabase_url, supabase_key)
 
 def analyze_with_ai(text, city_hint):
-  f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-    prompt = f"""Проанализируй объявление об аренде в городе {city_hint}. Текст: "{text}"
-    Верни ТОЛЬКО JSON: {{"price": число_или_null, "category": "studio/1-room/2-room/3-room/room/null", "address": "строка_или_null", "comment": "пояснение"}}"""
+    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+    prompt = f"Проанализируй объявление об аренде в городе {city_hint}. Текст: {text}. Верни ТОЛЬКО JSON: {{\"price\": число_или_null, \"category\": \"studio/1-room/2-room/3-room/room/null\", \"address\": \"строка_или_null\", \"comment\": \"пояснение\"}}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     headers = {'Content-Type': 'application/json'}
     try:
@@ -40,7 +39,10 @@ async def run_task():
     await client.start()
 
     res = supabase.table("channels").select("*").eq("username", "arendatumen72rus").single().execute()
-    if not res.data: return
+    if not res.data:
+        print("❌ Канал не найден")
+        await client.disconnect()
+        return
     
     ch = res.data
     conf = ch['parser_config']
@@ -48,34 +50,36 @@ async def run_task():
     city = conf['typing'].get('geo_city', 'Тюмень')
 
     async for msg in client.iter_messages(ch['username'], min_id=last_id, reverse=True, limit=50):
-        if not msg.text or len(msg.text) < 30: continue
+        if not msg.text or len(msg.text) < 30:
+            continue
         
         # --- ИНИЦИАЛИЗАЦИЯ ---
         ai_analysis = "Processed by Regex"
         category = "other"
         price = 0
         
-        # --- НОВЫЙ БЛОК: ОЧИСТКА ХВОСТА ---
+        # --- ОЧИСТКА ХВОСТА ---
         trash_markers = ['#', '________', 'Подписывайтесь', 'Подпишись', 'Связь с Админом', 'Наш Чат', '⚡️']
         clean_text = msg.text
         for marker in trash_markers:
             clean_text = clean_text.split(marker)[0]
         clean_text = clean_text.strip()
         
-        # --- НОВЫЙ БЛОК: ПОИСК КАТЕГОРИИ (С границами слов \b) ---
+        # --- ПОИСК КАТЕГОРИИ ---
         cat_patterns = {
-            "1-room": [r'\b1к\b', r'1 комнатная', r'однокомнатная'],
-            "2-room": [r'\b2к\b', r'2 комнатная', r'двухкомнатная'],
-            "3-room": [r'\b3к\b', r'3 комнатная', r'трехкомнатная'],
+            "1-room": [r'\b1к\b', r'1 комнатная', r'однокомнатная', r'1-к квартиру'],
+            "2-room": [r'\b2к\b', r'2 комнатная', r'двухкомнатная', r'2-к квартиру'],
+            "3-room": [r'\b3к\b', r'3 комнатная', r'трехкомнатная', r'3-к квартиру'],
             "studio": [r'студия', r'квартира-студия'],
-            "room": [r'\bкомната\b', r'вобщежитии']
+            "room": [r'\bкомната\b', r'вобщежитии', r'сдается комната']
         }
         for cat_name, patterns in cat_patterns.items():
             for pattern in patterns:
                 if re.search(pattern, clean_text, re.IGNORECASE):
                     category = cat_name
                     break
-            if category != "other": break
+            if category != "other":
+                break
 
         # --- ПОИСК ЦЕНЫ КОДОМ ---
         price_found = re.findall(r'(\d[\d\s]{3,})\s*(?:₽|руб|т\.р|тыс)', clean_text.replace('\xa0', ' '))
@@ -98,9 +102,14 @@ async def run_task():
 
         content_hash = hashlib.md5(clean_text.encode()).hexdigest()
         post_data = {
-            "channel_id": ch['id'], "telegram_msg_id": msg.id, "deal_type": "rent",
-            "category": category, "price": price, "city": city,
-            "raw_text_cleaned": clean_text, "content_hash": content_hash,
+            "channel_id": ch['id'], 
+            "telegram_msg_id": msg.id, 
+            "deal_type": "rent",
+            "category": category, 
+            "price": price, 
+            "city": city,
+            "raw_text_cleaned": clean_text, 
+            "content_hash": content_hash,
             "details": {"ai_comment": ai_analysis, "full_text_raw": msg.text[:500]}
         }
 
@@ -115,7 +124,8 @@ async def run_task():
                 }).execute()
                 print(f"✅ Добавлен: #{msg.id} | {price} руб | {category}")
         except Exception as e:
-            if "duplicate key" not in str(e): print(f"❌ Ошибка записи #{msg.id}: {e}")
+            if "duplicate key" not in str(e):
+                print(f"❌ Ошибка записи #{msg.id}: {e}")
 
         last_id = msg.id
 
