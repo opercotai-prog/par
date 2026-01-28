@@ -109,8 +109,16 @@ async def run_task():
                 ai_analysis = "AI failed or returned empty"
 
         # 6. ФИНАЛЬНАЯ ПРОВЕРКА И ЗАПИСЬ
-        if price < 5000:
-            print(f"⏩ Пропуск {msg.id}: Цена слишком низкая или не найдена.")
+        if price < 5000 or category == "other":
+            print(f"🔍 Пост {msg.id}: Нужна помощь ИИ (Цена: {price}, Кат: {category})")
+            ai_data = analyze_with_ai(clean_text, city)
+            
+            if ai_data:
+                # ДОБАВЬ ЭТУ СТРОКУ НИЖЕ:
+                print(f"      🤖 Ответ ИИ для {msg.id}: {ai_data}") 
+                
+                price = ai_data.get('price') or price
+                # ... дальше старый код
             # Обновляем прогресс даже при пропуске, чтобы не возвращаться к этому посту
             last_id = msg.id
             continue
