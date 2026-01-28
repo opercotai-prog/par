@@ -19,12 +19,13 @@ gemini_key = os.getenv("GEMINI_KEY")
 supabase = create_client(supabase_url, supabase_key)
 
 def analyze_with_ai(text, city_hint):
-    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-    prompt = f"Проанализируй объявление об аренде в городе {city_hint}. Текст: {text}. Верни ТОЛЬКО JSON: {{\"price\": число_или_null, \"category\": \"studio/1-room/2-room/3-room/room/null\", \"address\": \"строка_или_null\", \"comment\": \"пояснение\"}}"
+    # Прямо указываем URL внутри функции, чтобы он не терялся
+    api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+    prompt = f"Проанализируй объявление об аренде в городе {city_hint}. Текст: {text}. Верни ТОЛЬКО JSON: {{\"price\": число_или_null, \"category\": \"studio/1-room/2-room/3-room/room/null\", \"comment\": \"пояснение\"}}"
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     headers = {'Content-Type': 'application/json'}
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=15)
+        response = requests.post(api_url, headers=headers, json=payload, timeout=15)
         if response.status_code == 200:
             result = response.json()
             answer = result['candidates'][0]['content']['parts'][0]['text']
@@ -58,18 +59,25 @@ async def run_task():
         category = "other"
         price = 0
         
-        # --- ОЧИСТКА ХВОСТА ---
-        trash_markers = ['#', '________', 'Подписывайтесь', 'Подпишись', 'Связь с Админом', 'Наш Чат', '⚡️']
-        clean_text = msg.text
+        # --- УЛУЧШЕННАЯ ОЧИСТКА ХВОСТА ---
+        # Режем по всем возможным маркерам мусора
+        raw_content = msg.text
+        # Убираем жирное выделение для корректного сплита
+        text_for_split = raw_content.replace('*', '').replace('_', '')
+        
+        trash_markers = ['Подписывайтесь', 'Подпишись', 'Связь с Админом', 'Наш Чат', '⚡️', '________', '#аренда']
+        
+        clean_text = text_for_split
         for marker in trash_markers:
             clean_text = clean_text.split(marker)[0]
+        
         clean_text = clean_text.strip()
         
         # --- ПОИСК КАТЕГОРИИ ---
         cat_patterns = {
-            "1-room": [r'\b1к\b', r'1 комнатная', r'однокомнатная', r'1-к квартиру'],
-            "2-room": [r'\b2к\b', r'2 комнатная', r'двухкомнатная', r'2-к квартиру'],
-            "3-room": [r'\b3к\b', r'3 комнатная', r'трехкомнатная', r'3-к квартиру'],
+            "1-room": [r'\b1к\b', r'\b1-к\b', r'1 комнатная', r'однокомнатная'],
+            "2-room": [r'\b2к\b', r'\b2-к\b', r'2 комнатная', r'двухкомнатная'],
+            "3-room": [r'\b3к\b', r'\b3-к\b', r'3 комнатная', r'трехкомнатная'],
             "studio": [r'студия', r'квартира-студия'],
             "room": [r'\bкомната\b', r'вобщежитии', r'сдается комната']
         }
@@ -91,7 +99,6 @@ async def run_task():
             print(f"🔍 Пост {msg.id}: Нужна помощь ИИ (Цена: {price}, Кат: {category})")
             ai_data = analyze_with_ai(clean_text, city)
             if ai_data:
-                print(f"      🤖 Ответ ИИ: {ai_data}")
                 price = ai_data.get('price') or price
                 category = ai_data.get('category') or category
                 ai_analysis = f"AI Success: {ai_data.get('comment', '')}"
@@ -110,7 +117,7 @@ async def run_task():
             "city": city,
             "raw_text_cleaned": clean_text, 
             "content_hash": content_hash,
-            "details": {"ai_comment": ai_analysis, "full_text_raw": msg.text[:500]}
+            "details": {"ai_comment": ai_analysis, "full_text_raw": msg.text[:400]}
         }
 
         try:
