@@ -20,9 +20,7 @@ gemini_key = os.getenv("GEMINI_KEY")
 supabase = create_client(supabase_url, supabase_key)
 
 def analyze_with_ai(text, city, config_instr):
-    """Использование Gemini для извлечения ЯДРА и ХВОСТА"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-    
     prompt = f"""
     Выдели данные из объявления (г. {city}). 
     ИНСТРУКЦИЯ КАНАЛА: {config_instr}
@@ -42,42 +40,70 @@ def analyze_with_ai(text, city, config_instr):
         if response.status_code == 200:
             raw = response.json()['candidates'][0]['content']['parts'][0]['text']
             return json.loads(re.sub(r'```json|```', '', raw).strip())
-    except: return None
+        else:
+            print(f"      ⚠️ Ошибка Gemini API: {response.status_code}")
+    except Exception as e: 
+        print(f"      ⚠️ Ошибка вызова ИИ: {e}")
+    return None
 
 async def run_task():
+    print("🚀 Старт скрипта...")
     client = TelegramClient(StringSession(session_str), api_id, api_hash)
     await client.start()
 
+    print("🛰 Подключение к Supabase...")
     res = supabase.table("channels").select("*").eq("username", "arendatumen72rus").single().execute()
+    if not res.data:
+        print("❌ Канал не найден в базе!")
+        return
+    
     ch = res.data
     conf = ch['parser_config']
     
     # Настройка дат
     start_date = datetime(2026, 1, 27, tzinfo=timezone.utc)
     end_date = datetime(2026, 1, 29, tzinfo=timezone.utc)
+    print(f"📅 Период поиска: {start_date} - {end_date}")
 
+    count_seen = 0
     async for msg in client.iter_messages(ch['username'], offset_date=end_date, limit=100):
-        if msg.date < start_date: break
-        if not msg.text or len(msg.text) < 30: continue
+        if msg.date < start_date: 
+            break
+        
+        count_seen += 1
+        if not msg.text or len(msg.text) < 30: 
+            continue
+
+        print(f"🔎 Обработка сообщения #{msg.id} от {msg.date}")
 
         # 1. Быстрый фильтр спама
         if any(m.lower() in msg.text.lower() for m in conf.get('extraction_rules', {}).get('is_spam_markers', [])):
+            print(f"   ⏩ Пропуск #{msg.id}: Маркер спама")
             continue
 
-        # 2. ИИ-АНАЛИЗ (Вместо тупого кода)
+        # 2. ИИ-АНАЛИЗ
         data = analyze_with_ai(msg.text, "Тюмень", conf.get('ai_parsing_instructions'))
         
-        if not data or not data.get('is_offer') or data.get('price', 0) < 5000:
+        if not data:
+            print(f"   ⏩ Пропуск #{msg.id}: ИИ не вернул данные")
+            continue
+            
+        print(f"      🤖 Ответ ИИ: is_offer={data.get('is_offer')}, price={data.get('price')}")
+
+        if not data.get('is_offer') or data.get('price', 0) < 5000:
+            print(f"   ⏩ Пропуск #{msg.id}: Не предложение или низкая цена")
             continue
 
         # 3. Сохранение
         content_hash = hashlib.md5(msg.text.encode()).hexdigest()
-        post_id = None
         try:
             p_res = supabase.table("posts").insert({
-                "channel_id": ch['id'], "telegram_msg_id": msg.id,
-                "deal_type": "rent", "category": data['category'],
-                "price": data['price'], "city": "Тюмень",
+                "channel_id": ch['id'], 
+                "telegram_msg_id": msg.id,
+                "deal_type": "rent", 
+                "category": data['category'],
+                "price": data['price'], 
+                "city": "Тюмень",
                 "raw_text_cleaned": msg.text.split('Подпишись')[0].strip(),
                 "content_hash": content_hash,
                 "details": data['details']
@@ -89,9 +115,13 @@ async def run_task():
                     "phones": [data['phone']],
                     "links": {"url": f"https://t.me/{ch['username']}/{msg.id}"}
                 }).execute()
-            print(f"✅ ИИ ДОБАВИЛ: #{msg.id} | {data['price']} руб | {data['category']} | {data['address']}")
-        except: continue
+            
+            print(f"   ✅ УСПЕХ: Пост #{msg.id} добавлен в базу.")
+            
+        except Exception as e:
+            print(f"   ❌ Ошибка базы на посте #{msg.id}: {e}")
 
+    print(f"🏁 Завершено. Всего просмотрено сообщений: {count_seen}")
     await client.disconnect()
 
 if __name__ == "__main__":
