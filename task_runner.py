@@ -2,145 +2,156 @@ import os
 import re
 import hashlib
 import asyncio
-import json
-import requests
+from datetime import datetime, timezone
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from supabase import create_client
 
-# --- КЛЮЧИ И НАСТРОЙКИ ---
+# --- КЛЮЧИ И НАСТРОЙКИ (Берутся из GitHub Secrets) ---
 api_id = int(os.getenv("TG_API_ID"))
 api_hash = os.getenv("TG_API_HASH")
 session_str = os.getenv("TG_SESSION_STRING")
 supabase_url = os.getenv("SUPABASEE_URL")
 supabase_key = os.getenv("SUPABASEE_KEY")
-gemini_key = os.getenv("GEMINI_KEY")
 
+# Инициализация Supabase
 supabase = create_client(supabase_url, supabase_key)
 
-# --- УНИВЕРСАЛЬНЫЙ ИИ-АНАЛИЗАТОР ---
-def analyze_with_semantic_passport(text, city, config):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-    
-    instructions = config.get('ai_parsing_instructions', {})
-    core_req = config.get('semantic_core', {}).get('required', [])
-    tail_fields = config.get('metadata_tail', {}).get('available_fields', [])
+def clean_text_by_passport(text):
+    """Очистка текста от мусора на основе паттернов канала"""
+    trash_markers = ['Подписывайтесь', 'Подпишись', 'Связь с Админом', 'Наш Чат', '⚡️', '________', '#аренда']
+    cleaned = text
+    # Убираем жирный шрифт и курсив для корректного поиска маркеров
+    cleaned = cleaned.replace('*', '').replace('_', '')
+    for marker in trash_markers:
+        cleaned = cleaned.split(marker)[0]
+    return cleaned.strip()
 
-    prompt = f"""
-    Ты — эксперт по недвижимости в г. {city}. Проанализируй пост и выдели данные.
+def get_core_data(text, config):
+    """Автоматическое извлечение Ядра данных (Цена, Категория, Телефон, Адрес)"""
     
-    ИНСТРУКЦИИ ДЛЯ ЭТОГО КАНАЛА:
-    - Логика цен: {instructions.get('price_logic')}
-    - Логика адреса: {instructions.get('address_logic')}
-    - Логика залога: {instructions.get('deposit_logic', 'извлеки сумму залога если есть')}
-    
-    ОБЯЗАТЕЛЬНОЕ ЯДРО (CORE): {core_req}
-    ДОПОЛНИТЕЛЬНЫЙ ХВОСТ (TAIL): {tail_fields}
+    # 1. Цена (ищем числа от 5000 до 300000)
+    # Предварительно чистим текст от пробелов внутри чисел: "25 000" -> "25000"
+    text_processed = re.sub(r'(?<=\d)\s(?=\d)', '', text)
+    prices = re.findall(r'\b(\d{4,6})\b', text_processed)
+    price = 0
+    if prices:
+        # Берем первое найденное число (в этом канале цена всегда в начале)
+        price = int(prices[0])
 
-    ТЕКСТ ПОСТА:
-    "{text}"
+    # 2. Категория (ищем по границам слов \b)
+    category = "other"
+    cat_map = {
+        "1-room": [r'\b1к\b', r'\b1-к\b', r'1 комнатная', r'однокомнатная'],
+        "2-room": [r'\b2к\b', r'\b2-к\b', r'2 комнатная', r'двухкомнатная'],
+        "3-room": [r'\b3к\b', r'\b3-к\b', r'3 комнатная', r'трехкомнатная'],
+        "studio": [r'студия', r'квартира-студия'],
+        "room": [r'\bкомната\b', r'вобщежитии', r'сдается комната']
+    }
+    for cat_name, patterns in cat_map.items():
+        if any(re.search(p, text, re.IGNORECASE) for p in patterns):
+            category = cat_name
+            break
 
-    Верни ТОЛЬКО JSON:
-    {{
-      "is_offer": bool,
-      "core": {{ "price": int, "category": str, "address": str, "phone": str }},
-      "tail": {{ "deposit": int, "utilities_separate": bool, "residential_complex": str, "pets_allowed": bool, "appliances": [] }},
-      "clean_description": "текст без ссылок и мусора (до 300 симв)",
-      "comment": "пояснение"
-    }}
-    """
-    
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-    try:
-        response = requests.post(url, json=payload, timeout=20)
-        if response.status_code == 200:
-            raw_answer = response.json()['candidates'][0]['content']['parts'][0]['text']
-            cleaned = re.sub(r'```json|```', '', raw_answer).strip()
-            return json.loads(cleaned)
-    except Exception as e:
-        print(f"      ⚠️ Ошибка ИИ: {e}")
-    return None
+    # 3. Телефон (стандартный поиск мобильных РФ)
+    phones = re.findall(r'\+?\d{10,12}', text.replace(' ', '').replace('-', ''))
+    phone = phones[0] if phones else None
+
+    # 4. Адрес (Логика: 2-я строка текста, где обычно пишут улицу)
+    lines = text.split('\n')
+    address = "Адрес не найден"
+    if len(lines) > 1:
+        # Ищем первую строку после заголовка, которая длиннее 5 символов
+        potential = [l.strip() for l in lines if len(l.strip()) > 5]
+        if len(potential) > 1:
+            address = potential[1] # Вторая значимая строка
+
+    return price, category, phone, address
 
 async def run_task():
     client = TelegramClient(StringSession(session_str), api_id, api_hash)
     await client.start()
 
-    # ИСПРАВЛЕНО: .not_.is_ (одно подчеркивание)
-    try:
-        channels_res = supabase.table("channels").select("*").not_.is_("parser_config", "null").eq("is_active", True).execute()
-    except Exception as e:
-        print(f"❌ Ошибка при запросе каналов: {e}")
+    # Загружаем конфиг канала из базы
+    res = supabase.table("channels").select("*").eq("username", "arendatumen72rus").single().execute()
+    if not res.data:
+        print("❌ Ошибка: Паспорт канала не найден в Supabase!")
         await client.disconnect()
         return
+
+    ch = res.data
+    conf = ch['parser_config']
     
-    for ch in channels_res.data:
-        conf = ch['parser_config']
-        last_id = ch.get('last_message_id', 0)
-        city = conf.get('semantic_core', {}).get('defaults', {}).get('city', 'Тюмень')
+    # НАСТРОЙКА ТЕСТОВОГО ПЕРИОДА (27.01.2026 - 28.01.2026)
+    start_date = datetime(2026, 1, 27, tzinfo=timezone.utc)
+    end_date = datetime(2026, 1, 29, tzinfo=timezone.utc) # До начала 29-го
+
+    print(f"🤖 ЗАПУСК АВТОМАТА для @{ch['username']}")
+    print(f"📅 Период: {start_date} ---> {end_date}")
+
+    count = 0
+    # Итерируем сообщения от новых к старым, начиная с конца 28 января
+    async for msg in client.iter_messages(ch['username'], offset_date=end_date, limit=200):
+        # Если ушли глубже 27 января — стоп
+        if msg.date < start_date:
+            break
         
-        print(f"📺 Обработка канала @{ch['username']} (с #{last_id})")
+        if not msg.text or len(msg.text) < 30:
+            continue
 
-        async for msg in client.iter_messages(ch['username'], min_id=last_id, reverse=True, limit=50):
-            if not msg.text or len(msg.text) < 30: continue
-            
-            is_spam = any(marker.lower() in msg.text.lower() for marker in conf.get('extraction_rules', {}).get('is_spam_markers', []))
-            if is_spam:
-                print(f"   ⏩ Пост {msg.id} пропущен (маркер спама)")
-                last_id = msg.id
-                continue
+        # 1. Фильтр СПАМА (из паспорта)
+        spam_markers = conf.get('extraction_rules', {}).get('is_spam_markers', [])
+        if any(m.lower() in msg.text.lower() for m in spam_markers):
+            continue
 
-            print(f"   🔍 Пост {msg.id}: Анализ через Семантическое Ядро...")
-            ai_data = analyze_with_semantic_passport(msg.text, city, conf)
-            
-            if not ai_data or not ai_data.get('is_offer'):
-                print(f"   ⏩ Пост {msg.id} пропущен (не предложение или ошибка ИИ)")
-                last_id = msg.id
-                continue
+        # 2. Очистка текста
+        clean_text = clean_text_by_passport(msg.text)
 
-            core = ai_data.get('core', {})
-            tail = ai_data.get('tail', {})
-            clean_text = ai_data.get('clean_description', msg.text[:300])
-            content_hash = hashlib.md5(clean_text.encode()).hexdigest()
+        # 3. Авто-извлечение данных (Ядро)
+        price, category, phone, address = get_core_data(clean_text, conf)
 
-            post_data = {
-                "channel_id": ch['id'],
-                "telegram_msg_id": msg.id,
-                "deal_type": "rent",
-                "category": core.get('category', 'other'),
-                "price": core.get('price', 0),
-                "city": city,
-                "raw_text_cleaned": clean_text,
-                "content_hash": content_hash,
-                "details": {
-                    "tail": tail,
-                    "ai_comment": ai_data.get('comment'),
-                    "full_raw_text": msg.text[:500]
-                }
+        # 4. Проверка валидности (если нет цены — это мусор)
+        if price < 5000:
+            continue
+
+        # 5. Хеширование и сохранение
+        content_hash = hashlib.md5(clean_text.encode()).hexdigest()
+        
+        post_data = {
+            "channel_id": ch['id'],
+            "telegram_msg_id": msg.id,
+            "deal_type": "rent",
+            "category": category,
+            "price": price,
+            "city": "Тюмень",
+            "raw_text_cleaned": clean_text,
+            "content_hash": content_hash,
+            "details": {
+                "address_auto": address,
+                "method": "automatic_regex_v2"
             }
+        }
 
-            try:
-                ins_res = supabase.table("posts").insert(post_data).execute()
-                if ins_res.data:
-                    p_id = ins_res.data[0]['id']
-                    phones = [core.get('phone')] if core.get('phone') else []
-                    if not phones:
-                        phones = re.findall(r'\+?\d{10,12}', msg.text)
+        try:
+            # Запись в таблицу posts
+            ins_res = supabase.table("posts").insert(post_data).execute()
+            
+            if ins_res.data and phone:
+                # Запись в таблицу contacts
+                supabase.table("contacts").insert({
+                    "post_id": ins_res.data[0]['id'],
+                    "phones": [phone],
+                    "links": {"url": f"https://t.me/{ch['username']}/{msg.id}"}
+                }).execute()
+                
+            print(f"✅ Обработан пост #{msg.id} ({msg.date.strftime('%d.%m %H:%M')}) | {price} руб | {category}")
+            count += 1
+            
+        except Exception as e:
+            if "duplicate key" not in str(e):
+                print(f"❌ Ошибка на посте {msg.id}: {e}")
 
-                    supabase.table("contacts").insert({
-                        "post_id": p_id,
-                        "phones": phones,
-                        "links": {"msg_url": f"https://t.me/{ch['username']}/{msg.id}"}
-                    }).execute()
-                    
-                    print(f"   ✅ ДОБАВЛЕН: #{msg.id} | {core.get('price')} руб | {core.get('category')}")
-            except Exception as e:
-                if "duplicate key" not in str(e):
-                    print(f"   ❌ Ошибка записи {msg.id}: {e}")
-
-            last_id = msg.id
-
-        supabase.table("channels").update({"last_message_id": last_id}).eq("id", ch['id']).execute()
-
+    print(f"🏁 ТЕСТ ЗАВЕРШЕН. Всего добавлено: {count} постов.")
     await client.disconnect()
 
 if __name__ == "__main__":
