@@ -20,12 +20,8 @@ supabase = create_client(supabase_url, supabase_key)
 
 # --- УНИВЕРСАЛЬНЫЙ ИИ-АНАЛИЗАТОР ---
 def analyze_with_semantic_passport(text, city, config):
-    """
-    Использует ИИ для извлечения Ядра и Хвоста на основе правил из Паспорта канала.
-    """
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
     
-    # Вытягиваем инструкции из паспорта
     instructions = config.get('ai_parsing_instructions', {})
     core_req = config.get('semantic_core', {}).get('required', [])
     tail_fields = config.get('metadata_tail', {}).get('available_fields', [])
@@ -46,11 +42,11 @@ def analyze_with_semantic_passport(text, city, config):
 
     Верни ТОЛЬКО JSON:
     {{
-      "is_offer": bool (это объявление о сдаче?),
+      "is_offer": bool,
       "core": {{ "price": int, "category": str, "address": str, "phone": str }},
       "tail": {{ "deposit": int, "utilities_separate": bool, "residential_complex": str, "pets_allowed": bool, "appliances": [] }},
       "clean_description": "текст без ссылок и мусора (до 300 симв)",
-      "comment": "почему такое решение"
+      "comment": "пояснение"
     }}
     """
     
@@ -69,8 +65,13 @@ async def run_task():
     client = TelegramClient(StringSession(session_str), api_id, api_hash)
     await client.start()
 
-    # 1. Берем все активные каналы, у которых ЕСТЬ паспорт (parser_config)
-    channels_res = supabase.table("channels").select("*").not__.is_("parser_config", "null").eq("is_active", True).execute()
+    # ИСПРАВЛЕНО: .not_.is_ (одно подчеркивание)
+    try:
+        channels_res = supabase.table("channels").select("*").not_.is_("parser_config", "null").eq("is_active", True).execute()
+    except Exception as e:
+        print(f"❌ Ошибка при запросе каналов: {e}")
+        await client.disconnect()
+        return
     
     for ch in channels_res.data:
         conf = ch['parser_config']
@@ -79,18 +80,15 @@ async def run_task():
         
         print(f"📺 Обработка канала @{ch['username']} (с #{last_id})")
 
-        # 2. Собираем новые сообщения (пачками по 50 для стабильности)
         async for msg in client.iter_messages(ch['username'], min_id=last_id, reverse=True, limit=50):
             if not msg.text or len(msg.text) < 30: continue
             
-            # Быстрый "грубый" фильтр мусора по маркерам из паспорта (экономим токены)
             is_spam = any(marker.lower() in msg.text.lower() for marker in conf.get('extraction_rules', {}).get('is_spam_markers', []))
             if is_spam:
                 print(f"   ⏩ Пост {msg.id} пропущен (маркер спама)")
                 last_id = msg.id
                 continue
 
-            # 3. ГЛУБОКИЙ АНАЛИЗ (ИИ по правилам паспорта)
             print(f"   🔍 Пост {msg.id}: Анализ через Семантическое Ядро...")
             ai_data = analyze_with_semantic_passport(msg.text, city, conf)
             
@@ -99,7 +97,6 @@ async def run_task():
                 last_id = msg.id
                 continue
 
-            # 4. ПОДГОТОВКА И ЗАПИСЬ ДАННЫХ
             core = ai_data.get('core', {})
             tail = ai_data.get('tail', {})
             clean_text = ai_data.get('clean_description', msg.text[:300])
@@ -122,14 +119,10 @@ async def run_task():
             }
 
             try:
-                # Вставка в таблицу posts
                 ins_res = supabase.table("posts").insert(post_data).execute()
-                
                 if ins_res.data:
-                    # Вставка в таблицу contacts (Шаг 3)
                     p_id = ins_res.data[0]['id']
                     phones = [core.get('phone')] if core.get('phone') else []
-                    # Если ИИ не нашел телефон, попробуемRegex как подстраховку
                     if not phones:
                         phones = re.findall(r'\+?\d{10,12}', msg.text)
 
@@ -146,7 +139,6 @@ async def run_task():
 
             last_id = msg.id
 
-        # 5. Обновляем точку остановки для канала
         supabase.table("channels").update({"last_message_id": last_id}).eq("id", ch['id']).execute()
 
     await client.disconnect()
