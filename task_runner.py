@@ -1,115 +1,94 @@
-import os
-import re
-import asyncio
+import os, re, asyncio
 from datetime import datetime, timezone
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from supabase import create_client
 
-# --- НАСТРОЙКИ ИЗ GITHUB SECRETS ---
-TG_API_ID = int(os.getenv("TG_API_ID"))
-TG_API_HASH = os.getenv("TG_API_HASH")
-TG_SESSION = os.getenv("TG_SESSION_STRING")
-SUPABASE_URL = os.getenv("SUPABASEE_URL")
-SUPABASE_KEY = os.getenv("SUPABASEE_KEY")
+# Ключи
+api_id = int(os.getenv("TG_API_ID"))
+api_hash = os.getenv("TG_API_HASH")
+session_str = os.getenv("TG_SESSION_STRING")
+supabase_url = os.getenv("SUPABASEE_URL")
+supabase_key = os.getenv("SUPABASEE_KEY")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase = create_client(supabase_url, supabase_key)
 
 def parse_post_no_ai(text):
-    """
-    Чистая бинарная логика и парсинг хвоста через Regex.
-    """
     clean_text = text.replace('\xa0', ' ').strip()
     
-    # 1. ЯДРО: ПРОВЕРКА ТЕЛЕФОНА
-    # Удаляем всё кроме цифр, чтобы найти номер в любом формате
+    # --- 1. ЯДРО (ТЕЛЕФОН) ---
     digits_only = re.sub(r'[^\d]', '', clean_text)
     phone_match = re.search(r'(7|8)9\d{9}', digits_only)
-    if not phone_match:
-        return None
+    if not phone_match: return None
     phone = phone_match.group(0)
 
-    # 2. ЯДРО: ПРОВЕРКА КЛЮЧЕЙ АРЕНДЫ
-    rent_keywords = ['сдам', 'сдается', 'сдаётся', 'собственник', 'аренда', 'евродвушка', 'студия']
+    # --- 2. ЯДРО (МАРКЕРЫ) ---
+    rent_keywords = ['сдам', 'сдается', 'сдаётся', 'собственник', 'аренда', 'студия', 'евродвушка']
     if not any(word in clean_text.lower() for word in rent_keywords):
         return None
 
-    # 3. ХВОСТ: ПОИСК ЦЕНЫ
+    # --- 3. ХВОСТ (ЦЕНА) ---
     price = 0
-    # Ищем числа от 10 до 200 (для форматов 25к, 30 т.р.) и от 5000 до 200000
-    # Учитываем пробелы: "30 000"
-    price_pattern = r'(\d[\d\s]{1,6})\s*(?:тыс|т\.р|тр|руб|₽|р\.|\s*\+|в месяц)'
-    matches = re.finditer(price_pattern, clean_text, re.IGNORECASE)
+    # Ищем числа: "28", "28 000", "28000" рядом с руб/т.р/+/в месяц
+    price_pattern = r'(\d[\d\s]{1,6})\s*(?:тыс|т\.р|тр|руб|₽|р\.|\s\+|\sкв|в месяц)'
+    matches = list(re.finditer(price_pattern, clean_text, re.IGNORECASE))
     
     for match in matches:
         val_str = re.sub(r'\s+', '', match.group(1))
         val = int(val_str)
+        if 10 <= val <= 200: val *= 1000 # из "28" в "28000"
         
-        # Если число маленькое (например 25), превращаем в 25000
-        if 10 <= val <= 200:
-            val = val * 1000
-            
         if 5000 <= val <= 200000:
-            # Проверка контекста: нет ли рядом слова "залог" или "депозит"
-            start, end = match.span()
-            context = clean_text[max(0, start-25):start].lower()
+            context = clean_text[max(0, match.start()-20):match.start()].lower()
             if 'залог' not in context and 'депозит' not in context:
                 price = val
                 break
 
-    # 4. ХВОСТ: ПОИСК АДРЕСА
-    address = "Адрес не найден"
-    addr_markers = ['ул.', 'улица', 'пр.', 'проспект', 'мкр', 'жк', 'адресу', 'район', 'тракт', 'подгорная']
+    # --- 4. ХВОСТ (АДРЕС) ---
+    address = "Тюмень (адрес в тексте)"
+    addr_markers = ['ул.', 'улица', 'пр.', 'проспект', 'мкр', 'жк', 'адресу', 'район', 'тракт', 'беловежская', 'мельникайте']
     lines = clean_text.split('\n')
     for line in lines:
         if any(marker in line.lower() for marker in addr_markers):
-            # Берем строку и чистим от лишних символов в начале
-            address = re.sub(r'^[^\w\sа-яА-Я]+', '', line).strip()
+            address = re.sub(r'^[^\w\sа-яА-Я]+', '', line).strip()[:100]
             break
 
-    return {
-        "price": price,
-        "address": address,
-        "phone": phone
-    }
+    return {"price": price, "address": address, "phone": phone}
 
 async def run_task():
-    client = TelegramClient(StringSession(TG_SESSION), TG_API_ID, TG_API_HASH)
+    client = TelegramClient(StringSession(session_str), api_id, api_hash)
     await client.start()
 
-    # Берем активный канал из базы
     channel_id = "arendatumen72rus"
-    
-    # Даты: 28.01.2026 - 29.01.2026
     start_date = datetime(2026, 1, 28, tzinfo=timezone.utc)
-    end_date = datetime(2026, 2, 01, tzinfo=timezone.utc)
+    end_date = datetime(2026, 2, 1, tzinfo=timezone.utc)
 
-    print(f"🚀 Запуск парсинга {channel_id} без ИИ...")
+    print(f"🚀 Сбор @{channel_id} (БЕЗ ИИ)...")
 
-    async for msg in client.iter_messages(channel_id, limit=300):
+    count = 0
+    saved = 0
+    async for msg in client.iter_messages(channel_id, limit=200):
         if msg.date < start_date: break
         if msg.date > end_date: continue
-        if not msg.text or len(msg.text) < 30: continue
+        if not msg.text: continue
 
-        # Логика парсинга
-        result = parse_post_no_ai(msg.text)
-
-        if result:
+        count += 1
+        res = parse_post_no_ai(msg.text)
+        
+        if res:
             try:
-                # Вставка в Supabase
                 supabase.table("posts").insert({
                     "channel_id": f"@{channel_id}",
-                    "post_text": msg.text.strip(),
-                    "price": result['price'],
-                    "address": result['address'],
-                    "phone": result['phone']
+                    "post_text": msg.text[:500], # обрезаем для базы
+                    "price": res['price'],
+                    "address": res['address'],
+                    "phone": res['phone']
                 }).execute()
-                print(f"✅ Сохранено: {result['price']} руб. | {result['address']} | тел: {result['phone']}")
-            except Exception as e:
-                # Ошибка будет если такой пост уже есть (по желанию можно добавить constraint)
-                continue
+                print(f"✅ Сохранено: {res['price']} руб. | {res['address']}")
+                saved += 1
+            except: continue
 
-    print("🏁 Сбор завершен.")
+    print(f"🏁 Итог: Проверено {count}, Сохранено {saved}")
     await client.disconnect()
 
 if __name__ == "__main__":
