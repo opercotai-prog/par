@@ -1,104 +1,83 @@
-import os
-import re
-import hashlib
-import asyncio
-import json
-import requests
+import os, re, hashlib, asyncio, json, requests
 from datetime import datetime, timezone
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from supabase import create_client
 
-# Ключи
-api_id = int(os.getenv("TG_API_ID"))
-api_hash = os.getenv("TG_API_HASH")
-session_str = os.getenv("TG_SESSION_STRING")
-supabase_url = os.getenv("SUPABASEE_URL")
-supabase_key = os.getenv("SUPABASEE_KEY")
-gemini_key = os.getenv("GEMINI_KEY")
+# Настройки (из Environment Variables)
+TG_API_ID = int(os.getenv("TG_API_ID"))
+TG_API_HASH = os.getenv("TG_API_HASH")
+TG_SESSION = os.getenv("TG_SESSION_STRING")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+GEMINI_KEY = os.getenv("GEMINI_KEY")
 
-supabase = create_client(supabase_url, supabase_key)
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def analyze_with_ai(text, city, config_instr):
-    """Вызывается только для сложных постов"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-    prompt = f"Извлеки данные (г. {city}): {text}. Инструкция: {config_instr}. Верни JSON: {{'price': int, 'category': str, 'address': str, 'phone': str, 'is_offer': bool}}"
-    try:
-        response = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
-        if response.status_code == 200:
-            raw = response.json()['candidates'][0]['content']['parts'][0]['text']
-            return json.loads(re.sub(r'```json|```', '', raw).strip())
-    except: return None
-
-async def run_task():
-    client = TelegramClient(StringSession(session_str), api_id, api_hash)
+async def main():
+    client = TelegramClient(StringSession(TG_SESSION), TG_API_ID, TG_API_HASH)
     await client.start()
 
-    res = supabase.table("channels").select("*").eq("username", "arendatumen72rus").single().execute()
+    # 1. Получаем паспорт канала из базы
+    res = supabase.table("channels_passport").select("*").eq("channel_id", "@arendatumen72rus").single().execute()
     ch = res.data
-    conf = ch['parser_config']
-    
-    # ТЕСТ за 27-28 января
-    start_date = datetime(2026, 1, 27, tzinfo=timezone.utc)
-    end_date = datetime(2026, 1, 29, tzinfo=timezone.utc)
+    passport = ch['post_passport']
 
-    async for msg in client.iter_messages(ch['username'], offset_date=end_date, limit=100):
-        if msg.date < start_date: break
-        if not msg.text or len(msg.text) < 30: continue
+    # 2. Устанавливаем границы дат (28.01.2026 - 29.01.2026 включительно)
+    # offset_date — это точка начала (сверху вниз), поэтому берем начало 30-го числа
+    start_border = datetime(2026, 1, 28, 0, 0, 0, tzinfo=timezone.utc)
+    end_border = datetime(2026, 1, 30, 0, 0, 0, tzinfo=timezone.utc)
 
-        # --- 1. ОЧИСТКА ХВОСТА (Код) ---
-        clean_text = msg.text.split('Подпишись')[0].split('⚡️')[0].split('________')[0].strip()
+    print(f"🚀 Начинаю сбор @{ch['channel_id']} за 28-29 января...")
+
+    async for msg in client.iter_messages(ch['channel_id'], offset_date=end_border):
+        # Если сообщение старше 28-го — выходим из цикла
+        if msg.date < start_border:
+            break
         
-        # --- 2. ПОПЫТКА ОБРАБОТКИ КОДОМ (Regex) ---
-        # Ищем цену только если рядом есть символы валюты (чтобы не путать с телефоном)
-        price_found = re.findall(r'(\d[\d\s]{3,})\s*(?:₽|руб|т\.р|тыс)', clean_text.replace('\xa0', ' '))
-        price = int(re.sub(r'\s+', '', price_found[0])) if price_found else 0
+        # Пропускаем пустые или короткие сообщения
+        if not msg.text or len(msg.text) < 20:
+            continue
+
+        # --- ШАГ 1: ЯДРО (БИНАРНО) ---
+        clean_text = msg.text.strip()
+        has_phone = re.search(r'\+?\d{10,12}', clean_text.replace(' ', '').replace('-', ''))
+        is_rent = any(word in clean_text.lower() for word in ['сдам', 'аренда', 'собственник'])
+
+        if not (has_phone and is_rent):
+            print(f"  ⏭ Пропуск #{msg.id}: Нет ядра (телефона или ключей)")
+            continue
+
+        # --- ШАГ 2: ХВОСТ (ИИ ПО ПАСПОРТУ) ---
+        print(f"  🔍 Анализ #{msg.id}...")
         
-        category = "other"
-        cat_map = {
-            "1-room": [r'\b1к\b', r'1-к', r'однокомнатная', r'1 комнатная'],
-            "2-room": [r'\b2к\b', r'2-к', r'двухкомнатная', r'2 комнатная'],
-            "studio": [r'студия', r'квартира-студия']
-        }
-        for cat_name, patterns in cat_map.items():
-            if any(re.search(p, clean_text, re.IGNORECASE) for p in patterns):
-                category = cat_name
-                break
+        prompt = f"""Объявление: "{clean_text}"
+        Инструкция для этого канала:
+        - Цена: {passport['price_rule']}
+        - Адрес: {passport['address_rule']}
+        - Игнорируй: {passport['ignore_noise']}
+        Верни JSON: {{"price": int, "address": "str", "phone": "str", "is_offer": bool}}"""
 
-        # --- 3. ВКЛЮЧАЕМ ИИ, ЕСЛИ КОД НЕ СПРАВИЛСЯ ---
-        method = "regex"
-        if price == 0 or category == "other":
-            print(f"🔍 Пост {msg.id}: Код не справился. Зовем ИИ...")
-            ai_data = analyze_with_ai(clean_text, "Тюмень", conf.get('ai_parsing_instructions'))
-            if ai_data and ai_data.get('is_offer'):
-                price = ai_data.get('price') or price
-                category = ai_data.get('category') or category
-                method = "ai_assisted"
-            elif price == 0: # Если ИИ тоже не нашел цену - в мусор
-                continue
-
-        # --- 4. ЗАПИСЬ ---
-        content_hash = hashlib.md5(clean_text.encode()).hexdigest()
         try:
-            p_res = supabase.table("posts").insert({
-                "channel_id": ch['id'], "telegram_msg_id": msg.id,
-                "deal_type": "rent", "category": category, "price": price, "city": "Тюмень",
-                "raw_text_cleaned": clean_text, "content_hash": content_hash,
-                "details": {"method": method}
-            }).execute()
-            
-            if p_res.data:
-                # Ищем телефон (просто все цифры)
-                phones = re.findall(r'\+?\d{10,12}', clean_text.replace(' ', '').replace('-', ''))
-                if phones:
-                    supabase.table("contacts").insert({
-                        "post_id": p_res.data[0]['id'], "phones": [phones[0]],
-                        "links": {"url": f"https://t.me/{ch['username']}/{msg.id}"}
-                    }).execute()
-            print(f"✅ Готово: #{msg.id} | {price} руб | {category} | ({method})")
-        except: continue
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
+            resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
+            ai_data = json.loads(re.sub(r'```json|```', '', resp.json()['candidates'][0]['content']['parts'][0]['text']).strip())
+
+            if ai_data.get('is_offer'):
+                # Запись в базу
+                supabase.table("posts").insert({
+                    "channel_id": ch['channel_id'],
+                    "post_text": clean_text,
+                    "price": ai_data['price'],
+                    "address": ai_data['address'],
+                    "phone": ai_data['phone']
+                }).execute()
+                print(f"    ✅ СОХРАНЕНО: {ai_data['price']} руб | {ai_data['address']}")
+        except Exception as e:
+            print(f"    ❌ Ошибка #{msg.id}: {e}")
 
     await client.disconnect()
+    print("🏁 Сбор завершен.")
 
 if __name__ == "__main__":
-    asyncio.run(run_task())
+    asyncio.run(main())
