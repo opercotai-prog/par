@@ -4,7 +4,7 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from supabase import create_client
 
-# Ключи (используем те имена, что у тебя в GitHub Secrets)
+# Ключи
 api_id = int(os.getenv("TG_API_ID"))
 api_hash = os.getenv("TG_API_HASH")
 session_str = os.getenv("TG_SESSION_STRING")
@@ -15,57 +15,64 @@ gemini_key = os.getenv("GEMINI_KEY")
 supabase = create_client(supabase_url, supabase_key)
 
 def analyze_with_ai(text, city, config_instr):
-    """Твоя рабочая функция без изменений в логике запроса"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
     prompt = f"Извлеки данные (г. {city}): {text}. Инструкция: {config_instr}. Верни JSON: {{'price': int, 'address': str, 'phone': str, 'is_offer': bool}}"
     try:
         response = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
         if response.status_code == 200:
             raw = response.json()['candidates'][0]['content']['parts'][0]['text']
-            # Чистим JSON от лишних знаков
             clean_json = re.sub(r'```json|```', '', raw).strip()
             return json.loads(clean_json)
     except Exception as e:
-        print(f"Ошибка ИИ: {e}")
+        print(f"   Ошибка ИИ: {e}")
         return None
 
 async def run_task():
     client = TelegramClient(StringSession(session_str), api_id, api_hash)
     await client.start()
 
-    # 1. Берем данные канала из новой таблицы
-    res = supabase.table("channels_passport").select("*").eq("channel_id", "@arendatumen72rus").single().execute()
+    # Убираем лишние @ если они есть
+    target_channel = "arendatumen72rus" 
+    
+    res = supabase.table("channels_passport").select("*").ilike("channel_id", f"%{target_channel}%").single().execute()
     ch = res.data
-    passport = ch['post_passport'] # Это наш JSON с правилами
+    passport = ch['post_passport']
     city = ch['city']
 
-    # 2. Даты: 28.01.2026 - 29.01.2026
+    # Даты
     start_date = datetime(2026, 1, 28, tzinfo=timezone.utc)
     end_date = datetime(2026, 1, 30, tzinfo=timezone.utc)
 
-    print(f"🚀 Сбор @{ch['channel_id']} за 28-29 января...")
+    print(f"🚀 Сбор @{target_channel} с {start_date} по {end_date}")
 
-    async for msg in client.iter_messages(ch['channel_id'], offset_date=end_date):
-        if msg.date < start_date: break
-        if not msg.text or len(msg.text) < 30: continue
-
-        # --- 1. ЯДРО (Бинарная проверка кодом) ---
-        clean_text = msg.text.strip()
-        has_phone = re.search(r'\+?\d{10,12}', clean_text.replace(' ', '').replace('-', ''))
-        is_rent = any(word in clean_text.lower() for word in ['сдам', 'аренда', 'собственник'])
-
-        if not (has_phone and is_rent):
+    count = 0
+    async for msg in client.iter_messages(target_channel, offset_date=end_date):
+        if msg.date < start_date:
+            break
+        
+        count += 1
+        if not msg.text or len(msg.text) < 20:
             continue
 
-        # --- 2. ХВОСТ (Анализ через ИИ по инструкции из паспорта) ---
-        # Передаем в ИИ правила из post_passport['price_rule'] и т.д.
+        # --- 1. ЯДРО (Бинарная проверка) ---
+        clean_text = msg.text.strip()
+        # Ищем телефон
+        has_phone = re.search(r'\+?\d{10,12}', clean_text.replace(' ', '').replace('-', ''))
+        # Ищем ключевики (расширил список для надежности)
+        is_rent = any(word in clean_text.lower() for word in ['сдам', 'аренда', 'собственник', 'сдаётся', 'сдается'])
+
+        if not (has_phone and is_rent):
+            #print(f"  Пропуск #{msg.id} (не прошло Ядро)") # Раскомментируй для полной отладки
+            continue
+
+        print(f"🔍 Нашел подходящий пост #{msg.id}, отправляю в ИИ...")
+
+        # --- 2. ХВОСТ (ИИ) ---
         instr = f"Цена: {passport['price_rule']}. Адрес: {passport['address_rule']}. Игнорируй: {passport['ignore_noise']}"
-        
         ai_data = analyze_with_ai(clean_text, city, instr)
 
         if ai_data and ai_data.get('is_offer'):
             try:
-                # --- 3. ЗАПИСЬ В ТАБЛИЦУ POSTS ---
                 supabase.table("posts").insert({
                     "channel_id": ch['channel_id'],
                     "post_text": clean_text,
@@ -76,8 +83,8 @@ async def run_task():
                 print(f"✅ В базу: #{msg.id} | {ai_data.get('price')} руб | {ai_data.get('address')}")
             except Exception as e:
                 print(f"❌ Ошибка записи: {e}")
-                continue
 
+    print(f"🏁 Сбор завершен. Проверено постов: {count}")
     await client.disconnect()
 
 if __name__ == "__main__":
