@@ -8,8 +8,8 @@ from supabase import create_client
 TG_API_ID = int(os.getenv("TG_API_ID"))
 TG_API_HASH = os.getenv("TG_API_HASH")
 TG_SESSION = os.getenv("TG_SESSION_STRING")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+SUPABASE_URL = os.getenv("SUPABASEE_URL")
+SUPABASE_KEY = os.getenv("SUPABASEE_KEY")
 GEMINI_KEY = os.getenv("GEMINI_KEY")
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
