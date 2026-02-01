@@ -77,7 +77,7 @@ async def run_task():
         
         if res:
             try:
-                supabase.table("posts").insert({
+                supabase.table("rposts").insert({
                     "channel_id": f"@{channel_id}",
                     "post_text": msg.text[:500], # обрезаем для базы
                     "price": res['price'],
