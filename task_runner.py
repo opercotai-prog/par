@@ -15,69 +15,57 @@ gemini_key = os.environ.get("GEMINI_KEY", "")
 supabase = create_client(supabase_url, supabase_key)
 
 def analyze_with_ai(text, city):
-    """ИИ-Агент: вызывается для добора данных"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-    
     prompt = f"""
-    Ты аналитик аренды в г. {city}. Извлеки данные из текста объявления.
-    - is_offer: true только если это сдача жилья.
-    - price: только основная цена в месяц (целое число, не залог, не метры).
-    - address: только улица/дом/ЖК. Если в тексте нет ГЕО-данных, пиши просто "{city}". Не бери описание ремонта или подъезда в адрес!
+    Ты аналитик аренды в г. {city}. Извлеки данные из текста.
+    - is_offer: true только если сдают жилье.
+    - price: только месячная аренда (целое число, не залог, не метры).
+    - address: только улица/дом/ЖК. Если адреса нет, пиши просто "{city}". 
     - phone: строго 11 цифр 79XXXXXXXXX.
-    
     Текст: {text}
-    Верни строго JSON: {{"price": int, "address": "str", "phone": "str", "is_offer": bool}}
+    Верни JSON: {{"price": int, "address": "str", "phone": "str", "is_offer": bool}}
     """
-    
     try:
         resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=15)
-        res_json = resp.json()
-        if 'candidates' not in res_json: return None
-        raw = res_json['candidates'][0]['content']['parts'][0]['text']
+        raw = resp.json()['candidates'][0]['content']['parts'][0]['text']
         return json.loads(re.sub(r'```json|```', '', raw).strip())
     except: return None
 
 def parse_with_regex(text):
-    """Скоростной Regex-парсер с фильтрацией мусора"""
     clean_text = text.split('⚡️')[0].split('Подпишись')[0].strip()
     lines = [l.strip() for l in clean_text.split('\n') if len(l.strip()) > 5]
     text_low = clean_text.lower()
     
-    # 1. ЯДРО (БЕРЕМ/НЕТ)
-    rent_keywords = ['сдам', 'аренда', 'собственник', 'сдается', 'хозяин', 'длительный', 'евродвушка']
-    if not any(word in text_low for word in rent_keywords):
-        return {"is_rent": False}
+    # 1. ЯДРО
+    rent_keywords = ['сдам', 'аренда', 'собственник', 'сдается', 'хозяин', 'длительный']
+    if not any(word in text_low for word in rent_keywords): return {"is_rent": False}
 
-    # 2. ТЕЛЕФОН (Защита от слипания)
-    # Ищем формат телефона в тексте, а не в очищенных цифрах
+    # 2. ТЕЛЕФОН
     phone_match = re.search(r'(?:\+?7|8)?[\s\-]?\(?9\d{2}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', clean_text)
     phone = re.sub(r'[^\d]', '', phone_match.group(0)) if phone_match else None
     if phone and len(phone) == 10: phone = "7" + phone
     elif phone and len(phone) == 11 and phone.startswith('8'): phone = "7" + phone[1:]
 
-    # 3. ЦЕНА (Исключение метров и залога)
+    # 3. ЦЕНА
     price = 0
     price_pattern = r'(\d[\d\s\.]*)\s*(?:тыс|т\.р|тр|руб|₽|р\.|\s\+|\sкв|в месяц)'
     for m in re.finditer(price_pattern, clean_text, re.IGNORECASE):
+        # Проверка: если перед числом есть "д." или "корп" — это адрес, а не цена
+        if re.search(r'(?:д\.|корп|ул)\.?\s*$', clean_text[:m.start()].lower()): continue
+        
         val = int(re.sub(r'[\s\.]', '', m.group(1)))
-        after = clean_text[m.end():m.end()+10].lower()
-        if any(x in after for x in ['кв', 'м2', 'м²']): continue # Пропуск площади
         if val <= 350: val *= 1000
         if 5000 <= val <= 400000:
             if 'залог' not in clean_text[max(0, m.start()-20):m.start()].lower():
                 price = val; break
 
-    # 4. АДРЕС (Черный список мусора)
+    # 4. АДРЕС
     address = None
-    bad_words = ['животных', 'имеется', 'собственник', 'сдам', 'оплата', 'ремонт', 'подъезд', 'ранее']
-    addr_markers = ['ул.', 'ул ', 'улица', 'пр.', 'жк', 'мкр', 'тракт', 'адресу']
-    
+    garbage = ['без животных', 'оплата', 'залог', 'собственник', 'сдам', 'евродвушка', 'ранее']
     for line in lines:
         line_low = line.lower()
-        # Если в строке больше 6 цифр — это телефон, а не адрес
-        if len(re.findall(r'\d', line_low)) > 6: continue
-        if any(m in line_low for m in addr_markers):
-            if not any(b in line_low for b in bad_words):
+        if any(m in line_low for m in ['ул.', 'ул ', 'жк', 'мкр', 'тракт']):
+            if not any(g in line_low for g in garbage):
                 address = line[:100].strip(); break
     
     return {"is_rent": True, "phone": phone, "price": price, "address": address, "clean_text": clean_text}
@@ -95,24 +83,22 @@ async def run_task():
         async for msg in client.iter_messages(ch['channel_id'].replace('@',''), limit=100):
             if not msg.text or msg.date < (datetime.now(timezone.utc) - timedelta(days=2)): continue
 
-            # ШАГ 1: Regex
             reg = parse_with_regex(msg.text)
             if not reg.get('is_rent'): continue 
 
-            # ШАГ 2: Гибридная проверка
-            # Если не нашли Цену или Адрес — зовем ИИ
-            if reg['price'] == 0 or not reg['address']:
-                print(f"   🔍 #{msg.id}: Добор данных через ИИ...")
+            # ГИБРИДНЫЙ ВЫБОР:
+            # Зовем ИИ, если: нет цены, нет адреса ИЛИ цена подозрительно низкая (< 10к)
+            is_suspicious = reg['price'] < 10000 
+            if is_suspicious or not reg['address'] or reg['price'] == 0:
+                print(f"   🔍 #{msg.id}: Regex не уверен ({reg['price']} р.). Зовем ИИ...")
                 ai = analyze_with_ai(reg['clean_text'], city)
                 if ai and ai.get('is_offer'):
                     data, method = ai, "ai_assisted"
-                elif reg['price'] > 0: # Если ИИ не помог, но цена от Regex есть - берем Regex
-                    data, method = reg, "regex_partial"
+                elif reg['price'] > 0: data, method = reg, "regex_partial"
                 else: continue
             else:
                 data, method = reg, "regex"
 
-            # ШАГ 3: Запись с проверкой на дубликат (хеш)
             content_hash = hashlib.md5(reg['clean_text'].encode()).hexdigest()
             try:
                 supabase.table("rposts").insert({
@@ -124,7 +110,7 @@ async def run_task():
                     "raw_json": {"method": method, "hash": content_hash}
                 }).execute()
                 print(f"   ✅ #{msg.id} [{method}]: {data['price']} р. | {data['address']}")
-            except: continue # Ошибка = дубликат
+            except: continue
 
     await client.disconnect()
 
