@@ -3,7 +3,7 @@ name: Update Posts Cron
 on:
   schedule:
     - cron: '*/30 * * * *' # Запуск каждые 30 минут
-  workflow_dispatch: # Позволяет запустить вручную через кнопку во вкладке Actions
+  workflow_dispatch: # Позволяет запустить вручную через кнопку
 
 jobs:
   run-parser:
@@ -20,15 +20,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install telethon supabase httpx
+          pip install telethon supabase requests
 
       - name: Run parser task
         env:
-          # Ваши старые секреты
           TG_API_ID: ${{ secrets.TG_API_ID }}
           TG_API_HASH: ${{ secrets.TG_API_HASH }}
           TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
-          # НОВЫЕ секреты с буквой E, чтобы не было конфликтов
           SUPABASEE_URL: ${{ secrets.SUPABASEE_URL }}
           SUPABASEE_KEY: ${{ secrets.SUPABASEE_KEY }}
+          GEMINI_KEY: ${{ secrets.GEMINI_KEY }} # ДОБАВИЛИ КЛЮЧ ИИ
         run: python task_runner.py
