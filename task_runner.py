@@ -9,18 +9,19 @@ api_id = int(os.environ.get("TG_API_ID", 0))
 api_hash = os.environ.get("TG_API_HASH", "")
 session_str = os.environ.get("TG_SESSION_STRING", "")
 supabase_url = os.environ.get("SUPABASEE_URL", "")
-supabase_key = os.environ.get("SUPABASEE_KEY", "")
+supabase_key = os.getenv("SUPABASEE_KEY", "")
 gemini_key = os.environ.get("GEMINI_KEY", "")
 
 supabase = create_client(supabase_url, supabase_key)
 
 def analyze_with_ai(text, city):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+    # ОБНОВЛЕННЫЙ ПРОМПТ
     prompt = f"""
-    Ты аналитик аренды в г. {city}. Извлеки данные из текста.
-    - is_offer: true только если сдают жилье.
-    - price: только месячная аренда (целое число, не залог, не метры).
-    - address: только улица/дом/ЖК. Если адреса нет, пиши просто "{city}". 
+    Ты аналитик аренды жилья в г. {city}. Извлеки данные из текста.
+    - is_offer: true только если сдают КВАРТИРУ, СТУДИЮ или КОМНАТУ.
+    - price: только месячная аренда (целое число, не залог).
+    - address: только улица/дом/ЖК. Если адреса нет, пиши просто "{city}".
     - phone: строго 11 цифр 79XXXXXXXXX.
     Текст: {text}
     Верни JSON: {{"price": int, "address": "str", "phone": "str", "is_offer": bool}}
@@ -36,8 +37,8 @@ def parse_with_regex(text):
     lines = [l.strip() for l in clean_text.split('\n') if len(l.strip()) > 5]
     text_low = clean_text.lower()
     
-    # 1. ЯДРО
-    rent_keywords = ['сдам', 'аренда', 'собственник', 'сдается', 'хозяин', 'длительный']
+    # 1. ЯДРО (ДОБАВЛЕНЫ СТУДИИ И КОМНАТЫ)
+    rent_keywords = ['сдам', 'аренда', 'собственник', 'сдается', 'хозяин', 'длительный', 'студия', 'студию', 'комната', 'комнату', 'евродвушка']
     if not any(word in text_low for word in rent_keywords): return {"is_rent": False}
 
     # 2. ТЕЛЕФОН
@@ -46,13 +47,11 @@ def parse_with_regex(text):
     if phone and len(phone) == 10: phone = "7" + phone
     elif phone and len(phone) == 11 and phone.startswith('8'): phone = "7" + phone[1:]
 
-    # 3. ЦЕНА
+    # 3. ЦЕНА (УЛУЧШЕН ПОИСК БЕЗ ПРОБЕЛОВ)
     price = 0
     price_pattern = r'(\d[\d\s\.]*)\s*(?:тыс|т\.р|тр|руб|₽|р\.|\s\+|\sкв|в месяц)'
-    for m in re.finditer(price_pattern, clean_text, re.IGNORECASE):
-        # Проверка: если перед числом есть "д." или "корп" — это адрес, а не цена
+    for m in re.finditer(price_pattern, clean_text.replace('рублей',' руб'), re.IGNORECASE):
         if re.search(r'(?:д\.|корп|ул)\.?\s*$', clean_text[:m.start()].lower()): continue
-        
         val = int(re.sub(r'[\s\.]', '', m.group(1)))
         if val <= 350: val *= 1000
         if 5000 <= val <= 400000:
@@ -61,7 +60,7 @@ def parse_with_regex(text):
 
     # 4. АДРЕС
     address = None
-    garbage = ['без животных', 'оплата', 'залог', 'собственник', 'сдам', 'евродвушка', 'ранее']
+    garbage = ['без животных', 'оплата', 'залог', 'собственник', 'сдам', 'евродвушка']
     for line in lines:
         line_low = line.lower()
         if any(m in line_low for m in ['ул.', 'ул ', 'жк', 'мкр', 'тракт']):
@@ -80,17 +79,15 @@ async def run_task():
         city = ch.get('city', 'Тюмень')
         print(f"📡 Канал: {ch['channel_id']}")
         
-        async for msg in client.iter_messages(ch['channel_id'].replace('@',''), limit=100):
-            if not msg.text or msg.date < (datetime.now(timezone.utc) - timedelta(days=2)): continue
+        async for msg in client.iter_messages(ch['channel_id'].replace('@',''), limit=150):
+            if not msg.text or msg.date < (datetime.now(timezone.utc) - timedelta(days=3)): continue
 
             reg = parse_with_regex(msg.text)
             if not reg.get('is_rent'): continue 
 
-            # ГИБРИДНЫЙ ВЫБОР:
-            # Зовем ИИ, если: нет цены, нет адреса ИЛИ цена подозрительно низкая (< 10к)
-            is_suspicious = reg['price'] < 10000 
-            if is_suspicious or not reg['address'] or reg['price'] == 0:
-                print(f"   🔍 #{msg.id}: Regex не уверен ({reg['price']} р.). Зовем ИИ...")
+            # ГИБРИДНЫЙ ВЫБОР (КОМНАТЫ < 10к ИДУТ К ИИ)
+            if reg['price'] < 10000 or not reg['address'] or reg['price'] == 0:
+                print(f"   🔍 #{msg.id}: Regex не уверен. Зовем ИИ...")
                 ai = analyze_with_ai(reg['clean_text'], city)
                 if ai and ai.get('is_offer'):
                     data, method = ai, "ai_assisted"
