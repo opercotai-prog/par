@@ -18,7 +18,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 async def process_with_ai(text):
     """Золотой стандарт промпта"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
     
     # Промпт настроен под твои колонки: price_value, area_sqm, property_type, address_raw
     prompt = f"""
