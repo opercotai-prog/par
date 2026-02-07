@@ -53,7 +53,7 @@ async def main():
     # 1. СОБИРАЕМ СЫРЬЕ
     res_ch = supabase.table("echannels").select("id, username").eq("status", "active").execute()
     for ch in res_ch.data:
-        async for msg in client.iter_messages(ch['username'], limit=15):
+        async for msg in client.iter_messages(ch['username'], limit=50):
             if not msg.text: continue
             try:
                 # Используем upsert чтобы не дублировать посты в eraw_posts
