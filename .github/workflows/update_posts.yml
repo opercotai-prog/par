@@ -2,7 +2,7 @@ name: Update Posts Cron
 
 on:
   schedule:
-    - cron: '*/30 * * * *' # Каждые 30 минут
+    - cron: '*/50 * * * *' # Каждые 30 минут
   workflow_dispatch: # Кнопка ручного запуска
 
 jobs:
