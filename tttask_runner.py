@@ -41,7 +41,7 @@ def clean_text_by_config(text, config):
 
 async def process_with_ai(text):
     """Золотой стандарт + Контакты + Чистка"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"={GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
     
     prompt = f"""
     Верни JSON строго по схеме. Если данных нет - null.
