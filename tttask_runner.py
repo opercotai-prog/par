@@ -127,10 +127,11 @@ async def main():
             print(f"❌ Ошибка сбора с канала {ch['username']}: {e}")
 
     # 2. ОБРАБОТКА ОЧЕРЕДИ (ИИ-СУДЬЯ)
-    res_new = supabase.table("eraw_posts").select("*").eq("status", "new").limit(15).execute()
+    res_new = supabase.table("eraw_posts").select("*").eq("status", "new").limit(5).execute()
     
     for post in res_new.data:
         print(f"🧐 ИИ оценивает пост {post['id']}...")
+        await asyncio.sleep(15) # Ждем 15 секунд между запросами к ИИ
         
         # Передаем очищенный текст
         text_to_parse = post['cleaned_text'] if post['cleaned_text'] else post['text']
