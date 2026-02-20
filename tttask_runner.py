@@ -29,22 +29,19 @@ def is_rent_keyword_found(text):
     return any(word in t_lower for word in keywords)
 
 async def process_with_ai(text, city_context):
-    """ИИ-Парсер: Gemini 2.0 Flash + Новая логика комнат и полей"""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
+    """ИИ-Парсер на базе твоего рабочего метода"""
+    # Оставляем модель gemini-2.5-flash, как в твоем рабочем коде
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
     
     prompt = f"""
     Ты — эксперт-модератор недвижимости в г. {city_context}.
     Проанализируй текст. Если это ПРЕДЛОЖЕНИЕ жилья (сдача) — вытяни данные.
     Если это ПОИСК (сниму, ищу) или мусор — поставь "is_ad": false.
 
-    ПРАВИЛА ДЛЯ ПОЛЯ rooms:
-    1. Если property_type "room" (комната, соседка) или "studio" — всегда ставь rooms: 1.
-    2. Если "apartment" (квартира целиком) — ставь реальное кол-во из текста.
-
     JSON СТРУКТУРА:
     {{
       "is_ad": boolean,
-      "deal_type": "rent" | "sale",
+      "deal_type": "rent",
       "property_type": "apartment" | "room" | "studio" | "house" | "coliving",
       "price_value": number | null,
       "deposit_value": number | null,
@@ -54,6 +51,11 @@ async def process_with_ai(text, city_context):
       "contact_phone": "только цифры 79...",
       "contact_tg": "username без @"
     }}
+    
+    Правила для rooms: 
+    - Если это комната (room) или студия (studio) - всегда 1.
+    - Если квартира (apartment) - реальное кол-во.
+    
     Текст: {text}
     """
     
@@ -72,9 +74,11 @@ async def process_with_ai(text, city_context):
         resp = requests.post(url, json=payload, timeout=30)
         res_json = resp.json()
         raw_ai_text = res_json['candidates'][0]['content']['parts'][0]['text']
-        clean_json = re.sub(r'```json|```', '', raw_ai_text).strip()
+        # Чистим JSON
+        clean_json = raw_ai_text.replace('```json', '').replace('```', '').strip()
         return json.loads(clean_json)
-    except:
+    except Exception as e:
+        print(f"⚠️ Ошибка ИИ для текста: {e}")
         return None
 
 async def main():
@@ -82,18 +86,27 @@ async def main():
     client = TelegramClient(StringSession(SESSION_STRING), int(API_ID), API_HASH)
     await client.start()
 
-    # 1. СБОР СЫРЬЯ
+    # 1. ПОЛУЧАЕМ ПАСПОРТА КАНАЛОВ
     res_ch = supabase.table("echannels").select("*").eq("status", "active").execute()
     
     for ch in res_ch.data:
         print(f"📡 Канал: {ch['username']} (Режим: {ch['processing_mode']})")
         
         async for msg in client.iter_messages(ch['username'], offset_date=TARGET_DATE + timedelta(days=1), limit=100):
-            if msg.date.date() < TARGET_DATE.date(): break
-            if msg.date.date() > TARGET_DATE.date(): continue
+            if msg.date.date() < TARGET_DATE.date():
+                break 
+            if msg.date.date() > TARGET_DATE.date():
+                continue 
+            
             if not msg.text: continue
 
-            should_process = (ch['processing_mode'] == 'AI_ONLY' or is_rent_keyword_found(msg.text))
+            should_process = False
+            if ch['processing_mode'] == 'AI_ONLY':
+                should_process = True 
+            else:
+                if is_rent_keyword_found(msg.text):
+                    should_process = True 
+            
             status = "new" if should_process else "ignored"
             
             supabase.table("eraw_posts").upsert({
@@ -104,14 +117,14 @@ async def main():
                 "created_at": msg.date.isoformat()
             }, on_conflict="channel_id, tg_post_id").execute()
 
-    # 2. ОБРАБОТКА ИИ (ОЧЕРЕДЬ)
+    # 2. ОБРАБОТКА ИИ (Твоя рабочая очередь)
     res_new = supabase.table("eraw_posts").select("*").eq("status", "new").execute()
     
     for post in res_new.data:
         channel_info = next((item for item in res_ch.data if item["id"] == post["channel_id"]), None)
         city = channel_info.get('target_city', 'Россия') if channel_info else 'Россия'
         
-        print(f"🧐 Анализ поста {post['id']} (Город {city})...")
+        print(f"🧐 ИИ анализирует пост {post['id']}...")
         ai_data = await process_with_ai(post['text'], city)
         
         if ai_data:
@@ -122,9 +135,9 @@ async def main():
                 "json_data": ai_data
             }).execute()
 
-            # Б) В eready_ads
+            # Б) В eready_ads (если это объявление)
             if ai_data.get('is_ad') is True:
-                # Генерация ссылок
+                # Генерируем ссылки
                 ch_user = channel_info.get('username', 'channel').replace('@', '')
                 source_url = f"https://t.me/{ch_user}/{post['tg_post_id']}"
                 main_photo_url = f"https://t.me/{ch_user}/{post['tg_post_id']}?embed=1"
@@ -133,7 +146,7 @@ async def main():
                     supabase.table("eready_ads").upsert({
                         "raw_post_id": post['id'],
                         "channel_id": post['channel_id'],
-                        "deal_type": ai_data.get('deal_type', 'rent'),
+                        "deal_type": "rent", 
                         "property_type": ai_data.get('property_type'),
                         "price_value": ai_data.get('price_value'),
                         "deposit_value": ai_data.get('deposit_value'),
@@ -145,7 +158,7 @@ async def main():
                         "source_url": source_url,
                         "main_photo_url": main_photo_url
                     }, on_conflict="raw_post_id").execute()
-                    print(f"✅ ПРИНЯТО: {ai_data.get('price_value')} руб.")
+                    print(f"✅ Готово: {ai_data.get('property_type')} за {ai_data.get('price_value')}")
                 except Exception as e:
                     print(f"⚠️ Ошибка в витрину: {e}")
 
