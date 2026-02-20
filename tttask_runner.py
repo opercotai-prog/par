@@ -24,12 +24,13 @@ TARGET_DATE = datetime(2026, 2, 17, tzinfo=timezone.utc)
 def is_rent_keyword_found(text):
     """Базовый фильтр для режима FILTER_FIRST"""
     if not text: return False
-    keywords = ['сдам', 'сдаю', 'сдается', 'сдаётся', 'сдаем', 'сдача']
+    keywords = ['сдам', 'сдаю', 'сдается', 'сдаётся', 'сдаем', 'сдача', 'пересдам']
     t_lower = text.lower()
     return any(word in t_lower for word in keywords)
 
 async def process_with_ai(text, city_context):
-    """ИИ-Парсер: понимает вольный стиль, извлекает комнаты и залоги"""
+    """ИИ-Парсер: комнаты (1 для комнат/студий), залоги и тип сделки"""
+    # Оставляем модель gemini-2.5-flash как в твоем исходнике
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
     
     prompt = f"""
@@ -37,9 +38,15 @@ async def process_with_ai(text, city_context):
     Проанализируй текст. Если это ПРЕДЛОЖЕНИЕ жилья (сдача) — вытяни данные.
     Если это ПОИСК (сниму, ищу) или мусор — поставь "is_ad": false.
 
+    ПРАВИЛА ДЛЯ ПОЛЯ rooms:
+    1. Если property_type "room" (комната, поиск соседки, подселение) — всегда ставь 1.
+    2. Если property_type "studio" — всегда ставь 1.
+    3. Если property_type "apartment" (целая квартира) — ставь реальное кол-во комнат.
+
     JSON СТРУКТУРА:
     {{
       "is_ad": boolean,
+      "deal_type": "rent" | "sale",
       "property_type": "apartment" | "room" | "studio" | "house" | "coliving",
       "price_value": number | null,
       "deposit_value": number | null,
@@ -55,7 +62,8 @@ async def process_with_ai(text, city_context):
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}
     ]
 
     try:
@@ -72,7 +80,7 @@ async def process_with_ai(text, city_context):
         return None
 
 async def main():
-    print(f"🚀 Запуск Завода. Цель: {TARGET_DATE.date()}")
+    print(f"🚀 Запуск Завода v3.6. Цель: {TARGET_DATE.date()}")
     client = TelegramClient(StringSession(SESSION_STRING), int(API_ID), API_HASH)
     await client.start()
 
@@ -82,61 +90,61 @@ async def main():
     for ch in res_ch.data:
         print(f"📡 Канал: {ch['username']} (Режим: {ch['processing_mode']})")
         
-        # Загружаем посты за конкретную дату
-        # Используем offset_date для ускорения поиска
         async for msg in client.iter_messages(ch['username'], offset_date=TARGET_DATE + timedelta(days=1), limit=100):
-            # Проверка: пост должен быть именно за 17 февраля
             if msg.date.date() < TARGET_DATE.date():
-                break # Ушли в прошлое, стоп
+                break 
             if msg.date.date() > TARGET_DATE.date():
-                continue # Еще в будущем, пропускаем
+                continue 
             
             if not msg.text: continue
 
-            # ЛОГИКА ФИЛЬТРАЦИИ ПО ПАСПОРТУ
             should_process = False
             if ch['processing_mode'] == 'AI_ONLY':
-                should_process = True # В вольных каналах шлем всё
+                should_process = True 
             else:
                 if is_rent_keyword_found(msg.text):
-                    should_process = True # В строгих только со словом 'сдам'
+                    should_process = True 
             
             status = "new" if should_process else "ignored"
             
-            # Сохраняем в сырье
+            # ВАЖНО: сохраняем msg.message (текст с разметкой), чтобы ИИ видел скрытые ссылки
             supabase.table("eraw_posts").upsert({
                 "channel_id": ch['id'],
                 "tg_post_id": msg.id,
-                "text": msg.text,
+                "text": msg.message,
                 "status": status,
                 "created_at": msg.date.isoformat()
             }, on_conflict="channel_id, tg_post_id").execute()
 
-    # 2. ОБРАБОТКА ИИ (ОЧЕРЕДЬ)
+    # 2. ОБРАБОТКА ИИ
+    # Убираем лимит, чтобы обработать всё за раз
     res_new = supabase.table("eraw_posts").select("*").eq("status", "new").execute()
     
     for post in res_new.data:
-        # Получаем контекст города из паспорта канала
         channel_info = next((item for item in res_ch.data if item["id"] == post["channel_id"]), None)
         city = channel_info.get('target_city', 'Россия') if channel_info else 'Россия'
         
-        print(f"🧐 Анализ поста {post['id']} (Канал {city})...")
+        print(f"🧐 Анализ поста {post['id']} ({city})...")
         ai_data = await process_with_ai(post['text'], city)
         
         if ai_data:
-            # А) В eparsed_posts
             supabase.table("eparsed_posts").insert({
                 "raw_post_id": post['id'],
                 "is_ad": ai_data.get('is_ad', False),
                 "json_data": ai_data
             }).execute()
 
-            # Б) В eready_ads (если ИИ подтвердил)
             if ai_data.get('is_ad'):
+                # Генерируем ссылки
+                ch_user = channel_info.get('username', 'channel').replace('@', '')
+                source_url = f"https://t.me/{ch_user}/{post['tg_post_id']}"
+                main_photo_url = f"https://t.me/{ch_user}/{post['tg_post_id']}?embed=1"
+
                 try:
                     supabase.table("eready_ads").upsert({
                         "raw_post_id": post['id'],
                         "channel_id": post['channel_id'],
+                        "deal_type": ai_data.get('deal_type', 'rent'),
                         "property_type": ai_data.get('property_type'),
                         "price_value": ai_data.get('price_value'),
                         "deposit_value": ai_data.get('deposit_value'),
@@ -144,9 +152,11 @@ async def main():
                         "area_sqm": ai_data.get('area_sqm'),
                         "address_raw": ai_data.get('address_raw'),
                         "contact_phone": ai_data.get('contact_phone'),
-                        "contact_tg": ai_data.get('contact_tg')
+                        "contact_tg": ai_data.get('contact_tg'),
+                        "source_url": source_url,
+                        "main_photo_url": main_photo_url
                     }, on_conflict="raw_post_id").execute()
-                    print(f"✅ Готово: {ai_data.get('property_type')} за {ai_data.get('price_value')}")
+                    print(f"✅ Готово: {ai_data.get('price_value')} руб.")
                 except Exception as e:
                     print(f"⚠️ Ошибка в витрину: {e}")
 
@@ -154,10 +164,10 @@ async def main():
         else:
             supabase.table("eraw_posts").update({"status": "error"}).eq("id", post['id']).execute()
             
-        await asyncio.sleep(12) # Пауза для лимитов Gemini
+        await asyncio.sleep(15) # Пауза для стабильности лимитов
 
     await client.disconnect()
-    print("🏁 Завод отработал смену.")
+    print("🏁 Смена на Заводе завершена.")
 
 if __name__ == "__main__":
     asyncio.run(main())
