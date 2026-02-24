@@ -12,12 +12,13 @@
     "react": "latest",
     "react-dom": "latest",
     "@supabase/supabase-js": "latest",
-    "lucide-react": "latest"
+    "lucide-react": "latest",
+    "tailwindcss": "latest"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "latest",
     "autoprefixer": "latest",
     "postcss": "latest",
-    "tailwindcss": "latest",
     "typescript": "latest",
     "@types/node": "latest",
     "@types/react": "latest",
