@@ -19,7 +19,7 @@ SUPABASE_KEY = os.environ.get('SUPABASEE_KEY')
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Твоя рабочая дата
-TARGET_DATE = datetime(2026, 3, 7, tzinfo=timezone.utc)
+TARGET_DATE = datetime(2026, 3, 6, tzinfo=timezone.utc)
 
 def is_rent_keyword_found(text):
     if not text: return False
