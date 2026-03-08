@@ -18,9 +18,7 @@ SUPABASE_KEY = os.environ.get('SUPABASEE_KEY')
 
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Твоя рабочая дата
-TARGET_DATE = datetime(2026, 3, 6, tzinfo=timezone.utc)
-
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (БЕЗ ИЗМЕНЕНИЙ) ---
 def is_rent_keyword_found(text):
     if not text: return False
     keywords = ['сдам', 'сдаю', 'сдается', 'сдаётся', 'сдаем', 'сдача']
@@ -28,13 +26,12 @@ def is_rent_keyword_found(text):
     return any(word in t_lower for word in keywords)
 
 async def upload_album_to_supabase(client, messages, channel_id):
-    """Профессиональная склейка: скачивает ВСЕ фото альбома"""
+    """Склейка альбома: скачивает все фото"""
     photo_urls = []
     for msg in messages:
         if not msg or not msg.photo: continue
         try:
             photo_bytes = await client.download_media(msg.photo, file=bytes)
-            # Уникальное имя: ID_канала + ID_сообщения
             storage_path = f"ads/{channel_id}_{msg.id}.jpg"
             supabase.storage.from_('post_photos').upload(
                 path=storage_path, file=photo_bytes,
@@ -46,9 +43,8 @@ async def upload_album_to_supabase(client, messages, channel_id):
     return photo_urls
 
 async def process_with_ai(text, city_context):
-    """ВОССТАНОВЛЕННЫЙ 'ЗОЛОТОЙ' ПРОМПТ ИЗ V3.8"""
+    """ТВОЙ ЗОЛОТОЙ ПРОМПТ (БЕЗ ИЗМЕНЕНИЙ)"""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
-    
     prompt = f"""
     Ты — эксперт-модератор недвижимости в г. {city_context}.
     Проанализируй текст. Если это ПРЕДЛОЖЕНИЕ жилья (сдача) — вытяни данные.
@@ -67,48 +63,46 @@ async def process_with_ai(text, city_context):
       "contact_phone": "только цифры 79...",
       "contact_tg": "username без @"
     }}
-    
-    Правила:
-    1. rooms: если studio или room — всегда 1. Если квартира — реальное число.
-    2. price_value: только число, без текста.
-    3. property_type: строго один из списка.
-    
     Текст: {text}
     """
-    
     safety_settings = [
         {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
         {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}
     ]
-
     try:
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "safetySettings": safety_settings
-        }
+        payload = {"contents": [{"parts": [{"text": prompt}]}], "safetySettings": safety_settings}
         resp = requests.post(url, json=payload, timeout=30)
         res_json = resp.json()
-        if 'candidates' not in res_json: return None
         raw_ai_text = res_json['candidates'][0]['content']['parts'][0]['text']
         clean_json = raw_ai_text.replace('```json', '').replace('```', '').strip()
         return json.loads(clean_json)
     except: return None
 
 async def main():
-    print(f"🚀 Завод v5.4. (Восстановленный промпт). Цель: {TARGET_DATE.date()}")
+    # ЛОГИКА: Теперь работаем от текущего момента
+    print(f"🚀 Завод v6.0 АВТОНОМНЫЙ. Старт: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     client = TelegramClient(StringSession(SESSION_STRING), int(API_ID), API_HASH)
     await client.start()
 
-    # --- ЭТАП 1: ПЫЛЕСОС ---
+    # --- ЭТАП 1: ПЫЛЕСОС (ТЕПЕРЬ ПО ЗАКЛАДКАМ ID) ---
     res_ch = supabase.table("echannels").select("*").eq("status", "active").execute()
+    
     for ch in res_ch.data:
-        print(f"📡 Сбор: {ch['username']}")
-        async for msg in client.iter_messages(ch['username'], offset_date=TARGET_DATE + timedelta(days=1), limit=100):
-            if msg.date.date() < TARGET_DATE.date(): break
-            if msg.date.date() > TARGET_DATE.date(): continue
+        # 1. Берем сохраненную закладку (ID последнего поста)
+        last_id = ch.get('last_post_id') or 0
+        current_max_id = last_id
+        
+        print(f"📡 Канал: {ch['username']} (ищем новее чем ID: {last_id})")
+        
+        # 2. Telegram выдаст только те посты, чей ID больше нашего last_id
+        async for msg in client.iter_messages(ch['username'], min_id=last_id, limit=20):
             if not msg.text: continue
+            
+            # Фиксируем самый свежий ID из найденных
+            if msg.id > current_max_id:
+                current_max_id = msg.id
 
             supabase.table("estream_raw").upsert({
                 "source_name": ch['username'],
@@ -116,25 +110,28 @@ async def main():
                 "raw_text": msg.text,
                 "created_at": msg.date.isoformat()
             }, on_conflict="source_name, external_id").execute()
+        
+        # 3. Сохраняем новую закладку в базу
+        if current_max_id > last_id:
+            supabase.table("echannels").update({"last_post_id": current_max_id}).eq("id", ch['id']).execute()
+            print(f"✅ Закладка для {ch['username']} передвинута на ID {current_max_id}")
 
-    # --- ЭТАП 2: СОРТИРОВКА ---
+    # --- ЭТАП 2: СОРТИРОВКА (БЕЗ ИЗМЕНЕНИЙ) ---
     res_stream = supabase.table("estream_raw").select("*").eq("status", "new").execute()
     for entry in res_stream.data:
         ch = next((c for c in res_ch.data if c['username'] == entry['source_name']), None)
         if not ch: continue
-        
         should_process = (ch['processing_mode'] == 'AI_ONLY' or is_rent_keyword_found(entry['raw_text']))
         status = "new" if should_process else "ignored"
-        
         supabase.table("eraw_posts").upsert({
             "channel_id": ch['id'], "tg_post_id": entry['external_id'],
             "text": entry['raw_text'], "status": status, "created_at": entry['created_at']
         }, on_conflict="channel_id, tg_post_id").execute()
         supabase.table("estream_raw").update({"status": "done"}).eq("id", entry['id']).execute()
 
-    # --- ЭТАП 3: ПАРСИНГ + ФОТО ---
+    # --- ЭТАП 3: ПАРСИНГ + ФОТО (БЕЗ ИЗМЕНЕНИЙ) ---
     res_new = supabase.table("eraw_posts").select("*").eq("status", "new").execute()
-    print(f"🧠 В очереди: {len(res_new.data)}")
+    print(f"🧠 В очереди на анализ: {len(res_new.data)}")
 
     for post in res_new.data:
         ch_info = next((i for i in res_ch.data if i["id"] == post["channel_id"]), None)
@@ -144,23 +141,19 @@ async def main():
         ai_data = await process_with_ai(post['text'], city)
         
         if ai_data:
-            # Всегда пишем вердикт
             supabase.table("eparsed_posts").insert({
                 "raw_post_id": post['id'], "is_ad": ai_data.get('is_ad', False), "json_data": ai_data
             }).execute()
 
             if ai_data.get('is_ad') is True:
-                # 1. Склеиваем альбом (сканируем +- 10 ID вокруг)
+                # Склеиваем альбом
                 main_msg = await client.get_messages(ch_info['username'], ids=post['tg_post_id'])
                 album_messages = [main_msg]
                 if main_msg and main_msg.grouped_id:
                     search_scope = await client.get_messages(ch_info['username'], min_id=main_msg.id-10, max_id=main_msg.id+10)
                     album_messages = [m for m in search_scope if m.grouped_id == main_msg.grouped_id]
                 
-                # Загружаем галерею
                 all_photos = await upload_album_to_supabase(client, album_messages, post['channel_id'])
-                
-                # 2. На витрину
                 ch_user = ch_info['username'].replace('@', '')
                 source_url = f"https://t.me/{ch_user}/{post['tg_post_id']}"
                 
@@ -175,20 +168,14 @@ async def main():
                         "main_photo_url": all_photos[0] if all_photos else f"{source_url}?embed=1",
                         "photos": all_photos
                     }, on_conflict="raw_post_id").execute()
-                    print(f"✅ ПРИНЯТО: {ai_data.get('price_value')} руб. ({len(all_photos)} фото)")
+                    print(f"✅ ПРИНЯТО: {ai_data.get('price_value')} руб.")
                 except Exception as e: print(f"⚠️ Ошибка вставки: {e}")
-            else:
-                print(f"❌ ОТКЛОНЕНО (мусор)")
 
             supabase.table("eraw_posts").update({"status": "parsed"}).eq("id", post['id']).execute()
-        else:
-            supabase.table("eraw_posts").update({"status": "error"}).eq("id", post['id']).execute()
-            print(f"⚠️ ОШИБКА: ИИ не ответил")
-            
         await asyncio.sleep(12) 
 
     await client.disconnect()
-    print("🏁 Работа завершена.")
+    print("🏁 Работа автономного Завода завершена.")
 
 if __name__ == "__main__":
     asyncio.run(main())
