@@ -10,6 +10,7 @@ from telethon.tl.types import Channel, Chat
 
 TARGET_DIALOG_IDS = {
     5231114308,
+    3712661428
     3884758964,
     3987433767,
 }
