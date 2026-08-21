@@ -1,10 +1,10 @@
 import asyncio
 import os
 import sys
-from datetime import timezone
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
+from telethon.tl.types import Channel, Chat
 
 
 def get_required_env(name: str) -> str:
@@ -19,29 +19,22 @@ def get_required_env(name: str) -> str:
     return value.strip()
 
 
-def format_date(message_date) -> str:
-    if not message_date:
-        return "дата неизвестна"
+def get_dialog_type(entity) -> str | None:
+    if isinstance(entity, Channel):
+        if entity.megagroup:
+            return "GROUP"
+        return "CHANNEL"
 
-    if message_date.tzinfo is None:
-        message_date = message_date.replace(tzinfo=timezone.utc)
+    if isinstance(entity, Chat):
+        return "GROUP"
 
-    return message_date.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    return None
 
 
 async def main() -> None:
-    api_id_raw = get_required_env("TG_API_ID")
+    api_id = int(get_required_env("TG_API_ID"))
     api_hash = get_required_env("TG_API_HASH")
     session_string = get_required_env("TG_SESSION_STRING")
-    channel = get_required_env("TG_CHANNEL")
-
-    try:
-        api_id = int(api_id_raw)
-    except ValueError as exc:
-        raise RuntimeError("TG_API_ID должен быть числом.") from exc
-
-    print("Подключение к Telegram...")
-    print(f"Канал: {channel}")
 
     client = TelegramClient(
         StringSession(session_string),
@@ -53,58 +46,47 @@ async def main() -> None:
         await client.connect()
 
         if not await client.is_user_authorized():
-            raise RuntimeError(
-                "Telegram-сессия не авторизована. "
-                "Проверьте TG_SESSION_STRING."
-            )
+            raise RuntimeError("Telegram-сессия не авторизована")
 
         me = await client.get_me()
+
         print(
-            "Аккаунт Telegram: "
-            f"id={me.id}, username={getattr(me, 'username', None)}"
+            f"Аккаунт: id={me.id}, "
+            f"username={getattr(me, 'username', None)}"
         )
+        print()
+        print("ДОСТУПНЫЕ ГРУППЫ, ЧАТЫ И КАНАЛЫ:")
+        print("=" * 110)
 
-        entity = await client.get_entity(channel)
+        count = 0
 
-        print(f"Entity type: {type(entity).__name__}")
-        print(f"Entity id: {getattr(entity, 'id', None)}")
-        print(f"Название: {getattr(entity, 'title', None)}")
-        print(f"Username: {getattr(entity, 'username', None)}")
-        print("Получение последних сообщений...")
-        print("-" * 80)
+        async for dialog in client.iter_dialogs():
+            entity = dialog.entity
+            dialog_type = get_dialog_type(entity)
 
-        messages = []
-
-        async for message in client.iter_messages(entity, limit=20):
-            messages.append(message)
-
-        print(f"Telethon получил объектов: {len(messages)}")
-
-        for message in messages:
-            text = message.text or "[сообщение без текста]"
-
-            print(f"ID: {message.id}")
-            print(f"Дата: {format_date(message.date)}")
-            print(f"Тип: {type(message).__name__}")
-            print("Текст:")
-            print(text)
+            if not dialog_type:
+                continue
 
             username = getattr(entity, "username", None)
-            if username:
-                print(f"Ссылка: https://t.me/{username}/{message.id}")
+            entity_id = getattr(entity, "id", None)
+            access_hash = getattr(entity, "access_hash", None)
 
-            print("-" * 80)
-
-        if not messages:
-            print("Сообщения не получены.")
             print(
-                "Проверьте, что аккаунт действительно имеет доступ "
-                "к публикациям этого канала."
+                f"INDEX={count} | "
+                f"TYPE={dialog_type} | "
+                f"TITLE={dialog.name!r} | "
+                f"USERNAME={username!r} | "
+                f"ID={entity_id} | "
+                f"ACCESS_HASH={access_hash}"
             )
+
+            count += 1
+
+        print("=" * 110)
+        print(f"Всего источников: {count}")
 
     finally:
         await client.disconnect()
-        print("Соединение с Telegram закрыто.")
 
 
 if __name__ == "__main__":
