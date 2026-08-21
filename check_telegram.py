@@ -13,10 +13,10 @@ def get_required_env(name: str) -> str:
     if not value:
         raise RuntimeError(
             f"Не задана переменная окружения {name}. "
-            f"Добавьте ее в GitHub Secrets."
+            "Добавьте ее в GitHub Secrets."
         )
 
-    return value
+    return value.strip()
 
 
 def format_date(message_date) -> str:
@@ -55,30 +55,52 @@ async def main() -> None:
         if not await client.is_user_authorized():
             raise RuntimeError(
                 "Telegram-сессия не авторизована. "
-                "Проверьте значение TG_SESSION_STRING."
+                "Проверьте TG_SESSION_STRING."
             )
+
+        me = await client.get_me()
+        print(
+            "Аккаунт Telegram: "
+            f"id={me.id}, username={getattr(me, 'username', None)}"
+        )
 
         entity = await client.get_entity(channel)
 
-        print(f"Название: {getattr(entity, 'title', channel)}")
+        print(f"Entity type: {type(entity).__name__}")
+        print(f"Entity id: {getattr(entity, 'id', None)}")
+        print(f"Название: {getattr(entity, 'title', None)}")
+        print(f"Username: {getattr(entity, 'username', None)}")
         print("Получение последних сообщений...")
         print("-" * 80)
 
-        count = 0
+        messages = []
 
         async for message in client.iter_messages(entity, limit=20):
+            messages.append(message)
+
+        print(f"Telethon получил объектов: {len(messages)}")
+
+        for message in messages:
             text = message.text or "[сообщение без текста]"
 
             print(f"ID: {message.id}")
             print(f"Дата: {format_date(message.date)}")
+            print(f"Тип: {type(message).__name__}")
             print("Текст:")
             print(text)
-            print(f"Ссылка: https://t.me/{channel.lstrip('@')}/{message.id}")
+
+            username = getattr(entity, "username", None)
+            if username:
+                print(f"Ссылка: https://t.me/{username}/{message.id}")
+
             print("-" * 80)
 
-            count += 1
-
-        print(f"Всего выведено сообщений: {count}")
+        if not messages:
+            print("Сообщения не получены.")
+            print(
+                "Проверьте, что аккаунт действительно имеет доступ "
+                "к публикациям этого канала."
+            )
 
     finally:
         await client.disconnect()
