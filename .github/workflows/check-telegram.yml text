@@ -1,0 +1,38 @@
+name: Check Telegram Messages
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Количество последних сообщений"
+        required: false
+        default: "20"
+        type: string
+
+jobs:
+  check-telegram:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    env:
+      TG_API_ID: ${{ secrets.TG_API_ID }}
+      TG_API_HASH: ${{ secrets.TG_API_HASH }}
+      TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
+      TG_CHANNEL: ${{ secrets.TG_CHANNEL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install telethon
+
+      - name: Check Telegram messages
+        run: python check_telegram.py
