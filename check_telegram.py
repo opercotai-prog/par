@@ -71,13 +71,8 @@ async def main() -> None:
         found_dialogs = {}
 
         async for dialog in client.iter_dialogs():
-            entity = dialog.entity
-            dialog_id = dialog.id
-
-            if dialog_id not in TARGET_DIALOG_IDS:
-                continue
-
-            found_dialogs[dialog_id] = dialog
+            if dialog.id in TARGET_DIALOG_IDS:
+                found_dialogs[dialog.id] = dialog
 
         if not found_dialogs:
             raise RuntimeError(
@@ -99,19 +94,13 @@ async def main() -> None:
             print(f"ТИП: {dialog_type}")
             print(f"НАЗВАНИЕ: {dialog.name}")
             print(f"ID: {dialog.id}")
-            print(
-                f"USERNAME: "
-                f"{getattr(entity, 'username', None)}"
-            )
+            print(f"USERNAME: {getattr(entity, 'username', None)}")
             print("ПОСЛЕДНИЕ 5 СООБЩЕНИЙ:")
             print("-" * 100)
 
             messages = []
 
-            async for message in client.iter_messages(
-                entity,
-                limit=5,
-            ):
+            async for message in client.iter_messages(entity, limit=5):
                 messages.append(message)
 
             if not messages:
