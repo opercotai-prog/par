@@ -47,6 +47,19 @@ def get_dialog_type(entity) -> str:
     return type(entity).__name__
 
 
+def matches_target(dialog_id: int) -> bool:
+    if dialog_id in TARGET_DIALOG_IDS:
+        return True
+
+    if abs(dialog_id) in TARGET_DIALOG_IDS:
+        return True
+
+    if abs(dialog_id) % 10_000_000_000 in TARGET_DIALOG_IDS:
+        return True
+
+    return False
+
+
 async def main() -> None:
     api_id = int(get_required_env("TG_API_ID"))
     api_hash = get_required_env("TG_API_HASH")
@@ -71,36 +84,59 @@ async def main() -> None:
         found_dialogs = {}
 
         async for dialog in client.iter_dialogs():
-            if dialog.id in TARGET_DIALOG_IDS:
+            if matches_target(dialog.id):
                 found_dialogs[dialog.id] = dialog
 
         if not found_dialogs:
+            print("Совпадения по ID не найдены.")
+            print()
+            print("Доступные группы и каналы:")
+
+            async for dialog in client.iter_dialogs():
+                entity = dialog.entity
+
+                if isinstance(entity, Channel):
+                    dialog_type = (
+                        "GROUP" if entity.megagroup else "CHANNEL"
+                    )
+                    print(
+                        f"TYPE={dialog_type} | "
+                        f"TITLE={dialog.name!r} | "
+                        f"DIALOG_ID={dialog.id} | "
+                        f"RAW_ID={abs(dialog.id)}"
+                    )
+
+                elif isinstance(entity, Chat):
+                    print(
+                        f"TYPE=GROUP | "
+                        f"TITLE={dialog.name!r} | "
+                        f"DIALOG_ID={dialog.id} | "
+                        f"RAW_ID={abs(dialog.id)}"
+                    )
+
             raise RuntimeError(
-                "Ни один из указанных диалогов не найден "
-                "в списке диалогов аккаунта."
+                "Ни один из указанных диалогов не найден."
             )
 
-        for dialog_id in sorted(TARGET_DIALOG_IDS):
-            dialog = found_dialogs.get(dialog_id)
-
-            if dialog is None:
-                print(f"ДИАЛОГ НЕ НАЙДЕН: ID={dialog_id}")
-                print("=" * 100)
-                continue
-
+        for dialog_id in sorted(found_dialogs):
+            dialog = found_dialogs[dialog_id]
             entity = dialog.entity
             dialog_type = get_dialog_type(entity)
 
             print(f"ТИП: {dialog_type}")
             print(f"НАЗВАНИЕ: {dialog.name}")
-            print(f"ID: {dialog.id}")
+            print(f"DIALOG ID: {dialog.id}")
+            print(f"RAW ID: {abs(dialog.id)}")
             print(f"USERNAME: {getattr(entity, 'username', None)}")
             print("ПОСЛЕДНИЕ 5 СООБЩЕНИЙ:")
             print("-" * 100)
 
             messages = []
 
-            async for message in client.iter_messages(entity, limit=5):
+            async for message in client.iter_messages(
+                entity,
+                limit=5,
+            ):
                 messages.append(message)
 
             if not messages:
